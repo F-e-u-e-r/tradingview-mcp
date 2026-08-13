@@ -2,31 +2,19 @@ import CDP from 'chrome-remote-interface';
 
 let client = null;
 let targetInfo = null;
-// Overridable via TV_CDP_HOST/TV_CDP_PORT (or CDP_HOST/CDP_PORT) env vars.
-// Default is 127.0.0.1, not localhost: on some Windows machines localhost
-// resolves to ::1 first, and Electron's --remote-debugging-port only listens on IPv4.
-export const CDP_HOST = process.env.TV_CDP_HOST || process.env.CDP_HOST || '127.0.0.1';
-export const CDP_PORT = Number(process.env.TV_CDP_PORT || process.env.CDP_PORT) || 9222;
+// Review build: the CDP endpoint is pinned to local loopback by design.
+// No env override — a config file cannot redirect the bridge to another host.
+// 127.0.0.1 rather than localhost: on some machines localhost resolves to ::1
+// first, and Electron's --remote-debugging-port only listens on IPv4.
+export const CDP_HOST = '127.0.0.1';
+export const CDP_PORT = 9222;
 const MAX_RETRIES = 5;
 const BASE_DELAY = 500;
 
-// Known direct API paths discovered via live probing (see PROBE_RESULTS.md)
+// Known direct API paths discovered via live probing (inherited from upstream)
 const KNOWN_PATHS = {
   chartApi: 'window.TradingViewApi._activeChartWidgetWV.value()',
-  chartWidgetCollection: 'window.TradingViewApi._chartWidgetCollection',
-  bottomWidgetBar: 'window.TradingView.bottomWidgetBar',
-  replayApi: 'window.TradingViewApi._replayApi',
-  alertService: 'window.TradingViewApi._alertService',
-  chartApiInstance: 'window.ChartApiInstance',
   mainSeriesBars: 'window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model().mainSeries().bars()',
-  // Phase 1: Strategy data — model().dataSources() → find strategy → .performance().value(), .ordersData(), .reportData()
-  strategyStudy: 'chart._chartWidget.model().model().dataSources()',
-  // Phase 2: Layouts — getSavedCharts(cb), loadChartFromServer(id)
-  layoutManager: 'window.TradingViewApi.getSavedCharts',
-  // Phase 5: Symbol search — searchSymbols(query) returns Promise
-  symbolSearchApi: 'window.TradingViewApi.searchSymbols',
-  // Phase 6: Pine scripts — REST API at pine-facade.tradingview.com/pine-facade/list/?filter=saved
-  pineFacadeApi: 'https://pine-facade.tradingview.com/pine-facade',
 };
 
 export { KNOWN_PATHS };
@@ -64,15 +52,13 @@ export async function getClient() {
   return connect();
 }
 
-export async function connect(targetId = null) {
+export async function connect() {
   let lastError;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const target = targetId ? await findTargetById(targetId) : await findChartTarget();
+      const target = await findChartTarget();
       if (!target) {
-        throw new Error(targetId
-          ? `CDP target ${targetId} not found — is the tab still open?`
-          : 'No TradingView chart target found. Is TradingView open with a chart?');
+        throw new Error('No TradingView chart target found. Is TradingView open with a chart?');
       }
       targetInfo = target;
       client = await CDP({ host: CDP_HOST, port: CDP_PORT, target: target.id });
@@ -92,21 +78,6 @@ export async function connect(targetId = null) {
   throw new Error(`CDP connection failed after ${MAX_RETRIES} attempts: ${lastError?.message}`);
 }
 
-/**
- * Re-attach the cached CDP client to a specific target id.
- * Used by tab_switch so subsequent reads (chart_get_state, data_get_*,
- * quote_get, screenshots) follow the activated tab instead of staying
- * glued to the target picked at first connect.
- */
-export async function reconnectTo(targetId) {
-  if (client) {
-    try { await client.close(); } catch { /* already gone */ }
-    client = null;
-    targetInfo = null;
-  }
-  return connect(targetId);
-}
-
 async function findChartTarget() {
   const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
   const targets = await resp.json();
@@ -114,12 +85,6 @@ async function findChartTarget() {
   return targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url))
     || targets.find(t => t.type === 'page' && /tradingview/i.test(t.url))
     || null;
-}
-
-async function findTargetById(id) {
-  const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
-  const targets = await resp.json();
-  return targets.find(t => t.id === id) || null;
 }
 
 export async function getTargetInfo() {
@@ -159,7 +124,7 @@ export async function disconnect() {
 }
 
 // --- Direct API path helpers ---
-// Each returns the STRING expression path after verifying it exists.
+// Returns the STRING expression path after verifying it exists.
 // Callers use the returned string in their own evaluate() calls.
 
 async function verifyAndReturn(path, name) {
@@ -172,20 +137,4 @@ async function verifyAndReturn(path, name) {
 
 export async function getChartApi() {
   return verifyAndReturn(KNOWN_PATHS.chartApi, 'Chart API');
-}
-
-export async function getChartCollection() {
-  return verifyAndReturn(KNOWN_PATHS.chartWidgetCollection, 'Chart Widget Collection');
-}
-
-export async function getBottomBar() {
-  return verifyAndReturn(KNOWN_PATHS.bottomWidgetBar, 'Bottom Widget Bar');
-}
-
-export async function getReplayApi() {
-  return verifyAndReturn(KNOWN_PATHS.replayApi, 'Replay API');
-}
-
-export async function getMainSeriesBars() {
-  return verifyAndReturn(KNOWN_PATHS.mainSeriesBars, 'Main Series Bars');
 }

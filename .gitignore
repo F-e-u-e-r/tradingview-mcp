@@ -1,7 +1,4 @@
 node_modules/
-screenshots/
-scripts/current.pine
+generated/
 temp_*
 *.log
-discovery-log.json
-rules.json

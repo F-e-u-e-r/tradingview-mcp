@@ -1,13 +1,15 @@
 /**
- * Tests for CDP input sanitization utilities and their integration across modules.
- * Covers safeString(), requireFinite(), source audit, and per-module validation.
+ * Tests for CDP input sanitization utilities and hardening invariants of the
+ * review build: safeString(), requireFinite(), per-module validation, a
+ * source-level audit for unsafe interpolation, localhost pinning, and the
+ * fixed screenshot output path.
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { safeString, requireFinite } from '../src/connection.js';
-import { setSymbol, setTimeframe, setType, manageIndicator, setVisibleRange } from '../src/core/chart.js';
+import { setSymbol, setTimeframe, setVisibleRange } from '../src/core/chart.js';
 import { drawShape } from '../src/core/drawing.js';
 
 // ── Mock helpers ─────────────────────────────────────────────────────────
@@ -113,10 +115,6 @@ describe('requireFinite() — numeric validation', () => {
     assert.throws(() => requireFinite('abc', 'value'), /value must be a finite number/);
   });
 
-  it('coerces null to 0', () => {
-    assert.equal(requireFinite(null, 'x'), 0);
-  });
-
   it('rejects undefined', () => {
     assert.throws(() => requireFinite(undefined, 'x'), /x must be a finite number/);
   });
@@ -126,12 +124,12 @@ describe('requireFinite() — numeric validation', () => {
   });
 });
 
-// ── chart.js — safeString in evaluate calls ──────────────────────────────
+// ── chart.js — sanitized evaluate calls ──────────────────────────────────
 
 describe('chart.js — sanitized evaluate calls', () => {
   it('setSymbol uses safeString in evaluate', async () => {
     const { _deps, evaluate } = mockDeps();
-    await setSymbol({ symbol: "NYMEX:CL1!", _deps });
+    await setSymbol({ symbol: 'NYMEX:CL1!', _deps });
     const call = evaluate.calls.find(c => c.includes('setSymbol'));
     assert.ok(call, 'setSymbol called');
     assert.ok(call.includes('"NYMEX:CL1!"'), 'symbol wrapped in double quotes via safeString');
@@ -143,10 +141,8 @@ describe('chart.js — sanitized evaluate calls', () => {
     const payload = "'; alert('xss'); //";
     await setSymbol({ symbol: payload, _deps });
     const call = evaluate.calls.find(c => c.includes('setSymbol'));
-    // Payload must be wrapped in JSON.stringify output — double-quoted, escaped
-    // It should NOT appear as a bare unquoted string that could break out
     assert.ok(call.includes(safeString(payload)), 'payload is JSON-escaped in evaluate call');
-    assert.ok(!call.includes(`setSymbol('`), 'no single-quoted interpolation');
+    assert.ok(!call.includes("setSymbol('"), 'no single-quoted interpolation');
   });
 
   it('setTimeframe uses safeString', async () => {
@@ -154,54 +150,6 @@ describe('chart.js — sanitized evaluate calls', () => {
     await setTimeframe({ timeframe: '15', _deps });
     const call = evaluate.calls.find(c => c.includes('setResolution'));
     assert.ok(call.includes('"15"'), 'timeframe wrapped via safeString');
-  });
-
-  it('setType validates chart type range 0-9', async () => {
-    const { _deps } = mockDeps();
-    // Valid names
-    for (const name of ['Candles', 'Line', 'Area', 'HeikinAshi']) {
-      const r = await setType({ chart_type: name, _deps });
-      assert.equal(r.success, true);
-    }
-    // Valid numbers
-    for (const n of [0, 1, 5, 9]) {
-      const r = await setType({ chart_type: String(n), _deps });
-      assert.equal(r.success, true);
-    }
-  });
-
-  it('setType rejects invalid chart types', async () => {
-    const { _deps } = mockDeps();
-    for (const bad of ['invalid', '10', '-1', '1.5', 'NaN']) {
-      await assert.rejects(
-        () => setType({ chart_type: bad, _deps }),
-        /Unknown chart type/,
-        `should reject chart_type="${bad}"`,
-      );
-    }
-  });
-
-  it('manageIndicator add uses safeString for indicator name', async () => {
-    const { _deps, evaluate } = mockDeps();
-    evaluate.calls.length = 0;
-    // First evaluate call is getAllStudies (before), then createStudy, then getAllStudies (after)
-    const evalFn = async (expr) => {
-      evaluate.calls.push(expr);
-      if (expr.includes('getAllStudies')) return ['id1'];
-      return undefined;
-    };
-    _deps.evaluate = evalFn;
-    await manageIndicator({ action: 'add', indicator: "Relative Strength Index", _deps });
-    const createCall = evaluate.calls.find(c => c.includes('createStudy'));
-    assert.ok(createCall, 'createStudy called');
-    assert.ok(createCall.includes('"Relative Strength Index"'), 'indicator name via safeString');
-  });
-
-  it('manageIndicator remove uses safeString for entity_id', async () => {
-    const { _deps, evaluate } = mockDeps();
-    await manageIndicator({ action: 'remove', entity_id: "abc123", _deps });
-    const call = evaluate.calls.find(c => c.includes('removeEntity'));
-    assert.ok(call.includes('"abc123"'), 'entity_id via safeString');
   });
 
   it('setVisibleRange validates from/to with requireFinite', async () => {
@@ -216,6 +164,18 @@ describe('chart.js — sanitized evaluate calls', () => {
     );
   });
 
+  it('setVisibleRange rejects an empty or inverted window', async () => {
+    const { _deps } = mockDeps();
+    await assert.rejects(
+      () => setVisibleRange({ from: 2000, to: 1000, _deps }),
+      /must be greater than from/,
+    );
+    await assert.rejects(
+      () => setVisibleRange({ from: 1000, to: 1000, _deps }),
+      /must be greater than from/,
+    );
+  });
+
   it('setVisibleRange passes valid numbers to evaluate', async () => {
     const { _deps, evaluate } = mockDeps();
     await setVisibleRange({ from: 1700000000, to: 1700100000, _deps });
@@ -226,7 +186,7 @@ describe('chart.js — sanitized evaluate calls', () => {
   });
 });
 
-// ── drawing.js — safeString + requireFinite ──────────────────────────────
+// ── drawing.js — safeString + requireFinite + shape allowlist ────────────
 
 describe('drawing.js — sanitized evaluate calls', () => {
   it('drawShape validates point coordinates with requireFinite', async () => {
@@ -241,17 +201,15 @@ describe('drawing.js — sanitized evaluate calls', () => {
     );
   });
 
-  it('drawShape validates point2 coordinates', async () => {
+  it('drawShape rejects shapes outside the fixed allowlist', async () => {
     const { _deps } = mockDeps();
-    await assert.rejects(
-      () => drawShape({
-        shape: 'trend_line',
-        point: { time: 100, price: 50 },
-        point2: { time: NaN, price: 60 },
-        _deps,
-      }),
-      /point2\.time must be a finite number/,
-    );
+    for (const bad of ['trend_line', 'rectangle', 'text', 'emoji', '']) {
+      await assert.rejects(
+        () => drawShape({ shape: bad, point: { time: 100, price: 50 }, _deps }),
+        /shape must be one of/,
+        `should reject shape="${bad}"`,
+      );
+    }
   });
 
   it('drawShape uses safeString for shape name', async () => {
@@ -262,29 +220,17 @@ describe('drawing.js — sanitized evaluate calls', () => {
     assert.ok(call.includes('"horizontal_line"'), 'shape name via safeString');
   });
 
-  it('drawShape uses validated coordinates in evaluate', async () => {
+  it('drawShape uses validated coordinates and a fixed style', async () => {
     const { _deps, evaluate } = mockDeps();
-    await drawShape({ shape: 'horizontal_line', point: { time: 1700000000, price: 5000.50 }, _deps });
+    await drawShape({ shape: 'vertical_line', point: { time: 1700000000, price: 5000.5 }, _deps });
     const call = evaluate.calls.find(c => c.includes('createShape'));
     assert.ok(call.includes('1700000000'), 'time in call');
     assert.ok(call.includes('5000.5'), 'price in call');
-  });
-
-  it('drawShape multipoint uses safeString and requireFinite', async () => {
-    const { _deps, evaluate } = mockDeps();
-    await drawShape({
-      shape: 'trend_line',
-      point: { time: 100, price: 50 },
-      point2: { time: 200, price: 60 },
-      _deps,
-    });
-    const call = evaluate.calls.find(c => c.includes('createMultipointShape'));
-    assert.ok(call, 'createMultipointShape called');
-    assert.ok(call.includes('"trend_line"'), 'shape name via safeString');
+    assert.ok(call.includes('overrides: {}'), 'style overrides are fixed, not caller-supplied');
   });
 });
 
-// ── Source-level audit ───────────────────────────────────────────────────
+// ── Source-level audits ──────────────────────────────────────────────────
 
 describe('source audit — no unsafe interpolation patterns', () => {
   const CORE_DIR = new URL('../src/core/', import.meta.url).pathname;
@@ -299,9 +245,9 @@ describe('source audit — no unsafe interpolation patterns', () => {
   }
 
   // Allowlist: compile-time constants that are safe to interpolate (API path
-  // strings and hardcoded DOM selectors — never user input).
+  // strings — never user input).
   const VULNERABLE_PATTERNS = [
-    /evaluate\([^)]*'\$\{(?!CHART_API|CWC|rp|apiPath|colPath|CHART_COLLECTION|DIALOG)/,
+    /evaluate\([^)]*'\$\{(?!CHART_API|apiPath|BARS_PATH)/,
   ];
 
   for (const file of coreFiles) {
@@ -315,16 +261,26 @@ describe('source audit — no unsafe interpolation patterns', () => {
   }
 });
 
-// ── Path traversal prevention ────────────────────────────────────────────
-
-describe('path traversal prevention', () => {
-  it('capture.js strips path separators from filename', () => {
-    const source = readFileSync(new URL('../src/core/capture.js', import.meta.url), 'utf8');
-    assert.ok(source.includes(".replace(/[\\/\\\\]/g, '_')"));
+describe('hardening invariants of the review build', () => {
+  it('connection.js pins CDP to 127.0.0.1:9222 with no env override', () => {
+    const source = readFileSync(new URL('../src/connection.js', import.meta.url), 'utf8');
+    assert.ok(!source.includes('process.env'), 'no env-based CDP endpoint override');
+    assert.ok(source.includes("CDP_HOST = '127.0.0.1'"), 'host pinned to loopback');
+    assert.ok(source.includes('CDP_PORT = 9222'), 'port pinned');
   });
 
-  it('batch.js strips path separators from filename', () => {
-    const source = readFileSync(new URL('../src/core/batch.js', import.meta.url), 'utf8');
-    assert.ok(source.includes(".replace(/[\\/\\\\]/g, '_')"));
+  it('capture.js exposes no caller-controlled output path or name', () => {
+    const source = readFileSync(new URL('../src/core/capture.js', import.meta.url), 'utf8');
+    assert.ok(!source.includes('filename'), 'no user-supplied name parameter');
+    assert.ok(source.includes("'generated', 'screenshots'"), 'fixed output directory');
+  });
+
+  it('no core module shells out or self-updates', () => {
+    const CORE_DIR = new URL('../src/core/', import.meta.url).pathname;
+    for (const file of readdirSync(CORE_DIR).filter(f => f.endsWith('.js'))) {
+      const source = readFileSync(join(CORE_DIR, file), 'utf8');
+      assert.ok(!/child_process|execSync|spawn\(/.test(source),
+        `${file} must not spawn processes in the review build`);
+    }
   });
 });
