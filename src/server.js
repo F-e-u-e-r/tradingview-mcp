@@ -3,7 +3,6 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { registerHealthTools } from './tools/health.js';
 import { registerChartTools } from './tools/chart.js';
 import { registerDataTools } from './tools/data.js';
-import { registerDrawingTools } from './tools/drawing.js';
 import { registerCaptureTools } from './tools/capture.js';
 
 const server = new McpServer(
@@ -13,19 +12,18 @@ const server = new McpServer(
     description: 'Review-only TradingView Desktop bridge (local CDP) for trade-record review',
   },
   {
-    instructions: `TradingView review bridge — 9 tools for reviewing trade records against a live TradingView Desktop chart via CDP on 127.0.0.1:9222.
+    instructions: `TradingView review bridge — 7 tools for reviewing trade records against a live TradingView Desktop chart via CDP on 127.0.0.1:9222.
 
 Typical flow for one trade record:
 1. chart_get_state — confirm connection and current chart
 2. chart_set_symbol + chart_set_timeframe — switch to the trade's instrument and resolution
 3. chart_set_visible_range — window around the trade time (unix seconds); it pages in older history, so it also serves as jump-to-date
 4. data_get_ohlcv — price context (summary by default)
-5. draw_shape — horizontal_line at entry/exit prices, vertical_line at the trade time
-6. capture_screenshot with wait_for_render=true — visual context
-7. draw_clear — remove annotations when done
+5. capture_screenshot with wait_for_render=true — visual context
 
 Boundaries (by design):
-- Chart mutations (symbol/timeframe/drawings) can persist into the saved TradingView layout. Work on a dedicated scratch layout and draw_clear after capturing.
+- Chart mutations (symbol/timeframe) can persist into the saved TradingView layout. Work on a dedicated scratch layout.
+- This release does NOT provide chart annotation (draw_shape / draw_clear). Marking a chart requires proving which drawings this session owns, and that ownership could not be established reliably across TradingView layout switches; a clear that cannot prove ownership would delete the user's own drawings. The capability returns only with a contract that can be proven.
 - This build has no account-mutating, Pine-editing, alert/watchlist, replay/order, UI-automation, process-control, or self-update tools.
 - The trade record itself is the source of truth; the chart provides visual context only.`,
   }
@@ -34,7 +32,6 @@ Boundaries (by design):
 registerHealthTools(server);
 registerChartTools(server);
 registerDataTools(server);
-registerDrawingTools(server);
 registerCaptureTools(server);
 
 // Startup notice (stderr so it doesn't interfere with MCP stdio protocol)

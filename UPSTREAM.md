@@ -50,6 +50,110 @@ This repository is a security-reviewed, review-only derivative of an upstream pr
 
 **Unchanged from base:** `LICENSE` (MIT, upstream author), `src/wait.js`, `src/tools/_format.js`, `eslint.config.mjs`, `tests/chart_history.test.js`, `scripts/launch_tv_debug_mac.sh`, `package-lock.json` dependency graph (root metadata resynced for the renamed package).
 
+## Branch scope: loopback security kernel ONLY
+
+This branch exists because a six-round hardening campaign on `review-v1` failed to
+converge. That campaign bundled the loopback security boundary together with drawing
+ownership, chart/range certification, connection-lifecycle boundedness, and a
+bespoke JavaScript static analyser, and then required a max-depth cross-family review
+to return zero findings on all of it at once. Rounds 4, 5 and 6 each closed the
+reported defects and introduced new ones in the same subsystems; the review never
+reached a fixed point, because the problem as posed did not have one. That campaign
+is preserved, frozen and unpushed, at `c44ee82` on `review-v1` — it is evidence, not
+a release candidate.
+
+The decomposition is now one correctness domain per release:
+
+- **Loopback security kernel (this branch)** — ship/no-ship on its own.
+- **Drawing ownership** — contract to be re-specified first (rounds 5–6 showed the
+  create → fingerprint → verify → delete sequence has an inherent identity/TOCTOU
+  problem across layout switches; the open question is whether TradingView exposes a
+  stable, scope-aware, creation-time identity at all, and if not the product contract
+  should narrow rather than a bespoke ownership protocol be built).
+- **Chart/range certification** — resumes only on declared or evidenced cadence.
+  Unknown is a legitimate result.
+- **General boundedness / hang cleanup** — separate from the security claim.
+
+### What this branch carries
+
+The loopback kernel that both reviewer families verified closed across rounds 2–6,
+transplanted onto the pre-hardening base rather than cherry-picked as whole commits:
+
+- a target is used only when its `webSocketDebuggerUrl` is present and pinned to
+  loopback:9222 — missing or empty fails closed;
+- `isLoopbackWsUrl` accepts only canonical loopback literals, agreed by BOTH the
+  WHATWG parser and the legacy `url.parse` that chrome-remote-interface actually
+  dials with (the round-2 CRITICAL parser differential), and rejects any
+  whitespace/control character (round-3 sol #3, which otherwise fell back to
+  re-fetching `/json/list` by id and trusting an unverified response);
+- the dial uses the exact verified URL, never a target id, with `local:true` so no
+  protocol fetch leaves loopback;
+- `assertLoopbackSocket` requires a confirmed ZERO redirect count and a loopback peer
+  on the LIVE socket, and runs before any Runtime/Page/DOM command — the round-2
+  CRITICAL where a rogue `:9222` answers the upgrade with a 3xx and ws silently
+  follows it off-host;
+- the control fetch uses `redirect:'manual'` and is pinned to the loopback endpoint;
+- module singletons commit only after the guard and every enable pass, so a
+  guard-refused target is never served.
+
+Architectural change made here, and NOT carried from the campaign: **no production
+module can obtain a raw CDP client.** `getClient` is module-private; callers get
+`ensureConnected()`, `capturePage(params)` and `evaluate(expression)`. The loopback
+guarantee is a property of how this file uses the transport, and handing the raw
+client to another module puts that guarantee beyond this file's control — which no
+source audit can restore afterwards. This is deliberately structural rather than
+enforced by an analyser: the campaign's own analyser was walked through three times.
+
+`npm test` now DISCOVERS test files instead of listing three by name — the listed
+form silently never ran `tests/loopback.test.js`, so the branch's own gate would have
+existed without executing.
+
+### The only question this branch asks a reviewer
+
+> On this diff, is there any route by which CDP or control traffic can reach a
+> non-loopback peer?
+
+Drawing, chart certification, general boundedness and JavaScript-syntax auditing are
+explicitly out of scope here and must not be re-audited into it.
+
+### The release surface is SEVEN tools — annotation was removed, not deferred
+
+`draw_shape` and `draw_clear` are not in this release. On the base, `draw_clear`
+called `removeAllShapes()` unconditionally: it deleted the user's pre-existing
+drawings, not just this session's. Six rounds of review then established why the
+obvious fix is not small — removing only our own annotations requires proving which
+drawings this session created, and across TradingView layout switches that ownership
+could not be established reliably (EntityIds are layout-local; create → fingerprint →
+verify → delete has an inherent identity/TOCTOU window). A clear that cannot prove
+ownership destroys user data.
+
+So the capability leaves the release rather than shipping with a caveat. It returns
+when its contract can be proven, which is the drawing workstream's entry condition —
+possibly by narrowing the product contract (a dedicated scratch layout, or no promise
+of automatic cleanup) rather than by building a bespoke ownership protocol.
+
+Enforcement, not just omission: `draw_shape`/`draw_clear` moved onto the tool-surface
+DENYLIST, so re-registering either fails by name; `tests/tool_surface.test.js` also
+DISPATCHES both against the live server and requires refusal — the listing is what a
+client sees, dispatch is what it can do. That check was verified discriminating: a
+registered tool failing for other reasons does not match the refusal pattern. The
+`drawing` module is also dropped from the `./core` package export; the source stays in
+the tree for the follow-up workstream.
+
+### Known and deliberately NOT addressed on this branch
+
+- `npm audit` reports 7 advisories (4 high) in the SDK's transitive graph. The base
+  predates the lockfile refresh that cleared them, and this branch's CI has no audit
+  step. This is a MANDATORY pre-release workstream of its own, deliberately kept out
+  of this diff so a reviewer faces one problem, not two. It must not be closed by
+  mechanically bumping to a green `npm audit`: `assertLoopbackSocket` reads ws's
+  `_redirects` internal, so a `ws` upgrade could silently change the very guard this
+  branch exists to prove. Triage first (production vs dev-only, reachable vs
+  build-only, whether the advisory affects the pinned version), and give any upgrade
+  its own tests and review.
+- Round-1..3 correctness findings in `chart.js` / `data.js` / `wait.js` /
+  `capture.js` are present as they were at the base; they belong to their own domains.
+
 ## Taking upstream updates (required procedure)
 
 1. `git fetch upstream` and read the full diff: `git diff c05b8f5755ed..upstream/main`.

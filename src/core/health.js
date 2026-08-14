@@ -6,10 +6,10 @@
  * network traffic beyond the local debug port (the upstream GitHub
  * update check was removed in this review build).
  */
-import { getClient, getTargetInfo, evaluate } from '../connection.js';
+import { ensureConnected, getTargetInfo, evaluate } from '../connection.js';
 
 export async function healthCheck() {
-  await getClient();
+  await ensureConnected();
   const target = await getTargetInfo();
 
   const state = await evaluate(`

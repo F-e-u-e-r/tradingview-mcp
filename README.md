@@ -10,12 +10,12 @@ This is not the general-purpose bridge. The upstream project exposes 84 tools in
 
 - **Localhost only.** The CDP endpoint is hard-pinned to `127.0.0.1:9222` — no env or config override.
 - **No high-privilege primitives.** No self-update, no process launch/kill, no arbitrary JS evaluation, no Pine editor, no alert/watchlist/replay/order capabilities. Removed at the source level (files deleted), not just unregistered.
-- **No arbitrary inputs.** No caller-controlled file paths (screenshots go to `generated/screenshots/` with program-generated names), no arbitrary drawing styles or text, timeframes are an enum, symbols are length-capped.
-- **Layout changes are treated as potentially persistent.** Changing symbol/timeframe and adding drawings can dirty the saved TradingView layout (and persist if layout autosave is on). Work on a dedicated scratch layout and `draw_clear` after screenshots.
+- **No arbitrary inputs.** No caller-controlled file paths (screenshots go to `generated/screenshots/` with program-generated names), timeframes are an enum, symbols are length-capped.
+- **Layout changes are treated as potentially persistent.** Changing symbol/timeframe can dirty the saved TradingView layout (and persist if layout autosave is on). Work on a dedicated scratch layout.
 - **Local-only health check.** The upstream GitHub update check was removed; the server makes no network requests beyond the local debug port.
-- **Enforced in CI.** `tests/tool_surface.test.js` asserts the tool list equals exactly the 9-tool allowlist and that named upstream capabilities are absent, so an upstream merge cannot silently reintroduce them.
+- **Enforced in CI.** `tests/tool_surface.test.js` asserts the tool list equals exactly the 7-tool allowlist and that named upstream capabilities are absent, so an upstream merge cannot silently reintroduce them.
 
-## The 9 tools
+## The 7 tools
 
 | Tool | Purpose in a review |
 |---|---|
@@ -25,9 +25,9 @@ This is not the general-purpose bridge. The upstream project exposes 84 tools in
 | `chart_set_timeframe` | Switch to the trade's resolution (enum) |
 | `chart_set_visible_range` | Jump/zoom to the trade's time window (pages in older history) |
 | `data_get_ohlcv` | Price context (summary by default) |
-| `draw_shape` | Mark entry/exit price (`horizontal_line`) or trade time (`vertical_line`) |
-| `draw_clear` | Remove annotations after capturing |
 | `capture_screenshot` | Screenshot to `generated/screenshots/` (fixed path) |
+
+Chart annotation (`draw_shape` / `draw_clear`) is **not in this release**. Removing an annotation safely requires proving which drawings this session created; across TradingView layout switches that ownership could not be established reliably, and a clear that cannot prove ownership deletes the user's own drawings. The capability returns with a contract that can be proven, not with a caveat.
 
 Intended architecture: **your trade records are the source of truth → analysis happens locally → the TradingView debug instance provides visual context only.**
 

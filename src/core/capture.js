@@ -4,7 +4,7 @@
  * program-generated file names. The tool accepts no path or name input
  * by design (review build). CDP capture only.
  */
-import { getClient, evaluate } from '../connection.js';
+import { capturePage, evaluate } from '../connection.js';
 import { waitForChartRender } from '../wait.js';
 import { writeFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
@@ -22,7 +22,6 @@ export async function captureScreenshot({ region, waitForRender = false } = {}) 
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   const filePath = join(SCREENSHOT_DIR, `tv_${which}_${ts}.png`);
 
-  const client = await getClient();
   let clip;
 
   if (which === 'chart') {
@@ -42,7 +41,7 @@ export async function captureScreenshot({ region, waitForRender = false } = {}) 
   const params = { format: 'png' };
   if (clip) params.clip = clip;
 
-  const { data } = await client.Page.captureScreenshot(params);
+  const { data } = await capturePage(params);
   writeFileSync(filePath, Buffer.from(data, 'base64'));
 
   return {

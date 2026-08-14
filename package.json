@@ -11,13 +11,15 @@
   "scripts": {
     "start": "node src/server.js",
     "lint": "eslint src/",
-    "test": "node --test tests/tool_surface.test.js tests/sanitization.test.js tests/chart_history.test.js"
+    "test": "node --test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "chrome-remote-interface": "^0.33.2"
+    "chrome-remote-interface": "^0.33.2",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
-    "eslint": "^9.39.4"
+    "eslint": "^9.39.4",
+    "ws": "^7.5.11"
   }
 }

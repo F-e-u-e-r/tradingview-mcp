@@ -1,8 +1,11 @@
 /**
  * Tool-surface gate for the review build.
  *
- * The server must expose EXACTLY the 9 allowlisted tools — and none of the
- * denylisted upstream capabilities. Runs fully offline (tools/list is static;
+ * The server must expose EXACTLY the 7 allowlisted tools — and none of the
+ * denylisted capabilities. `draw_shape`/`draw_clear` are on the DENYLIST, not
+ * merely absent from the allowlist: this release removed them because their
+ * clear path cannot prove session ownership, and re-registering them must fail
+ * here by name rather than as an anonymous set mismatch. Runs fully offline (tools/list is static;
  * no TradingView needed). If a future upstream merge reintroduces a tool
  * registration or import, this test fails in CI before it ships.
  */
@@ -21,8 +24,6 @@ const ALLOWLIST = [
   'chart_set_timeframe',
   'chart_set_visible_range',
   'data_get_ohlcv',
-  'draw_shape',
-  'draw_clear',
   'capture_screenshot',
 ].sort();
 
@@ -56,10 +57,15 @@ const DENYLIST = [
   'data_get_pine_tables', 'data_get_pine_boxes', 'data_get_indicator',
   'data_get_strategy_results', 'data_get_trades', 'data_get_equity',
   'draw_list', 'draw_remove_one', 'draw_get_properties',
+  // Annotation, removed from THIS release (not upstream residue): draw_clear
+  // could not prove which drawings the session owns, so a clear risked deleting
+  // the user's own work. They return only with a provable ownership contract.
+  'draw_shape', 'draw_clear',
 ];
 
 let child;
 let tools;
+let rpc;
 
 function lineRpc(proc) {
   let buf = '';
@@ -90,7 +96,7 @@ function lineRpc(proc) {
 describe('tool surface (allowlist + denylist gate)', () => {
   before(async () => {
     child = spawn('node', [SERVER], { stdio: ['pipe', 'pipe', 'ignore'] });
-    const rpc = lineRpc(child);
+    rpc = lineRpc(child);
     await rpc(1, 'initialize', {
       protocolVersion: '2025-06-18',
       capabilities: {},
@@ -105,7 +111,7 @@ describe('tool surface (allowlist + denylist gate)', () => {
     if (child) child.kill();
   });
 
-  it('exposes exactly the 9 allowlisted tools', () => {
+  it('exposes exactly the 7 allowlisted tools', () => {
     assert.deepEqual(tools.map(t => t.name).sort(), ALLOWLIST);
   });
 
@@ -126,10 +132,24 @@ describe('tool surface (allowlist + denylist gate)', () => {
     assert.equal(t.inputSchema.properties.symbol.maxLength, 32);
   });
 
-  it('draw_shape allows only fixed shapes and no style/text/point2 inputs', () => {
-    const t = tools.find(t => t.name === 'draw_shape');
-    assert.deepEqual([...t.inputSchema.properties.shape.enum].sort(), ['horizontal_line', 'vertical_line']);
-    assert.deepEqual(Object.keys(t.inputSchema.properties).sort(), ['point', 'shape']);
+  it('the removed annotation tools are not merely unlisted — they cannot be DISPATCHED', async () => {
+    // Absence from tools/list is what a client sees; this is what a client can
+    // actually DO. A registration that leaked back while the listing was
+    // filtered, or a handler still reachable by name, fails here.
+    for (const name of ['draw_shape', 'draw_clear']) {
+      const res = await rpc(100 + name.length, 'tools/call', { name, arguments: {} });
+      const errText = JSON.stringify(res.error ?? res.result ?? {});
+      assert.ok(res.error || res.result?.isError,
+        `${name} must not be dispatchable in this release (got: ${errText.slice(0, 160)})`);
+      assert.match(errText, /not found|unknown|invalid|no such/i,
+        `${name} must be refused as unknown, not executed (got: ${errText.slice(0, 160)})`);
+    }
+  });
+
+  it('nothing in the served surface mentions annotation, so a client cannot infer it exists', () => {
+    const blob = JSON.stringify(tools).toLowerCase();
+    assert.ok(!blob.includes('draw_shape') && !blob.includes('draw_clear'),
+      'the tool listing must not advertise a capability this release does not provide');
   });
 
   it('capture_screenshot accepts no filename or path input', () => {
