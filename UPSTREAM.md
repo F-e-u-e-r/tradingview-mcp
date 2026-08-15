@@ -162,6 +162,54 @@ the tree for the follow-up workstream.
 - Round-1..3 correctness findings in `chart.js` / `data.js` / `wait.js` /
   `capture.js` are present as they were at the base; they belong to their own domains.
 
+### Chart correctness contract (2026-08-16)
+
+Five clauses, each one a counterexample reproduced on the release tree BEFORE it was
+written. Deliberately small: this contract does not attempt cadence inference,
+forming-bar tolerance, range padding, or completeness flags. An earlier campaign built
+all of those, and the orientation pass for this workstream showed why they could not be
+transplanted — they were successive refinements of a contract that had never been
+stated. `tests/chart_contract.test.js` is the contract; each clause has a falsifying
+case and a not-over-corrected pin.
+
+- **C1 temporal binding.** `data_get_ohlcv` has TWO explicit modes. Omit `from`/`to` for
+  the newest `count` bars (unchanged, so a correctness fix is not a breaking API
+  change). Pass BOTH for a window, and the answer contains only bars from it. A half
+  window is a caller error, not something to infer. A window with no loaded bars FAILS
+  rather than falling back — that fallback was the actual defect: a caller reviewing
+  last Tuesday's trade silently received this afternoon's prices. The data layer also
+  does not widen the window on the caller's behalf; guessing there is what produced the
+  bug. Decision: refuse rather than substitute, because a silent semantic substitution
+  is worse than a refusal the caller can act on.
+- **C2 observable achievement.** `setVisibleRange().success` is true only when the
+  chart's own reported visible range was OBSERVED to contain the request. No cadence, no
+  pad, no forming-bar inference. This may false-NEGATIVE when the UI snaps the view;
+  that direction is accepted deliberately, because the alternative is a false positive.
+- **C3 unknown stays unknown.** An unreadable or null endpoint is reported as `null`,
+  never masked with `|| 0`. Epoch 0 remains a legal, distinguishable timestamp — pinned
+  by a test, so the fix cannot trade one masking bug for another.
+- **C4 no silent substitution.** A window the loaded bars do not cover leaves the view
+  where it is. It is NOT answered by zooming to the nearest available data.
+- **C5 verified identity.** `waitForChartReady` reads the chart API's own
+  `symbol()`/`resolution()` — the same authority `chart_get_state` reports — instead of
+  scraping the DOM legend, and compares them EXACTLY. `expectedTf` had been accepted and
+  never read at all, so a timeframe switch could report ready while the chart was still
+  on the old resolution; a substring symbol match could be satisfied by a different
+  ticker containing the requested one.
+
+Testability: `getOhlcv` and `waitForChartReady` gained the injection seam the other core
+modules already use. No new production export, and no capability leaves `connection.js`.
+
+Recorded, NOT decided here: `setSymbol`/`setTimeframe` still return `success: true`
+while reporting `chart_ready: false`. C5 makes that gap MORE visible rather than less —
+readiness now genuinely fails when the switch is unconfirmed, where before it usually
+passed. Whether `success` should follow `chart_ready` is achievement semantics for those
+two tools, a different clause from the five above, and is left for adjudication rather
+than folded in silently.
+
+Also left alone deliberately: the history-paging loop still defaults `more = true` when
+`requestMoreDataAvailable()` throws, and `capture.js`/render-stability were not touched.
+
 ## Taking upstream updates (required procedure)
 
 1. `git fetch upstream` and read the full diff: `git diff c05b8f5755ed..upstream/main`.

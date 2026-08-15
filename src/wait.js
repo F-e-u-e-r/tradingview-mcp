@@ -1,35 +1,38 @@
-import { evaluate } from './connection.js';
+import { evaluate as _evaluate, KNOWN_PATHS } from './connection.js';
+
+const CHART_API = KNOWN_PATHS.chartApi;
 
 const DEFAULT_TIMEOUT = 10000;
 const POLL_INTERVAL = 200;
 
-export async function waitForChartReady(expectedSymbol = null, expectedTf = null, timeout = DEFAULT_TIMEOUT) {
+export async function waitForChartReady(expectedSymbol = null, expectedTf = null, timeout = DEFAULT_TIMEOUT, evaluate = _evaluate) {
   const start = Date.now();
   let lastBarCount = -1;
   let stableCount = 0;
 
   while (Date.now() - start < timeout) {
+    // Read the AUTHORITATIVE state: the chart API's own symbol()/resolution(),
+    // the same source chart_get_state reports. The previous version scraped the
+    // DOM legend for a symbol and counted `[class*="bar"]` elements, and never
+    // looked at the resolution at all — so setTimeframe could report ready while
+    // the chart was still on the old one (contract C5).
     const state = await evaluate(`
       (function() {
-        // Check for loading spinner
-        var spinner = document.querySelector('[class*="loader"]')
-          || document.querySelector('[class*="loading"]')
-          || document.querySelector('[data-name="loading"]');
-        var isLoading = spinner && spinner.offsetParent !== null;
-
-        // Try to get bar count from data window or chart
-        var barCount = -1;
+        var out = { loading: false, symbol: null, resolution: null, barCount: -1 };
         try {
-          var bars = document.querySelectorAll('[class*="bar"]');
-          barCount = bars.length;
-        } catch {}
-
-        // Get current symbol from header
-        var symbolEl = document.querySelector('[data-name="legend-source-title"]')
-          || document.querySelector('[class*="title"] [class*="apply-common-tooltip"]');
-        var currentSymbol = symbolEl ? symbolEl.textContent.trim() : '';
-
-        return { isLoading: !!isLoading, barCount: barCount, currentSymbol: currentSymbol };
+          var spinner = document.querySelector('[class*="loader"]')
+            || document.querySelector('[data-name="loading"]');
+          out.loading = !!(spinner && spinner.offsetParent !== null);
+        } catch (e) {}
+        try {
+          var chart = ${CHART_API};
+          var sym = chart.symbol();
+          if (typeof sym === 'string') out.symbol = sym;
+          var res = chart.resolution();
+          if (res !== null && res !== undefined) out.resolution = String(res);
+          out.barCount = chart._chartWidget.model().mainSeries().bars().size();
+        } catch (e) {}
+        return out;
       })()
     `);
 
@@ -39,14 +42,21 @@ export async function waitForChartReady(expectedSymbol = null, expectedTf = null
     }
 
     // Not ready if still loading
-    if (state.isLoading) {
+    if (state.loading) {
       stableCount = 0;
       await new Promise(r => setTimeout(r, POLL_INTERVAL));
       continue;
     }
 
-    // Check symbol match if expected
-    if (expectedSymbol && state.currentSymbol && !state.currentSymbol.toUpperCase().includes(expectedSymbol.toUpperCase())) {
+    // Identity must MATCH, not merely contain: a substring test let a request
+    // for one ticker be satisfied by a different one that contains it.
+    if (expectedSymbol && String(state.symbol ?? '').toUpperCase() !== String(expectedSymbol).toUpperCase()) {
+      stableCount = 0;
+      await new Promise(r => setTimeout(r, POLL_INTERVAL));
+      continue;
+    }
+    // The resolution was passed in and must actually be verified (C5).
+    if (expectedTf && String(state.resolution ?? '').toUpperCase() !== String(expectedTf).toUpperCase()) {
       stableCount = 0;
       await new Promise(r => setTimeout(r, POLL_INTERVAL));
       continue;
@@ -67,7 +77,7 @@ export async function waitForChartReady(expectedSymbol = null, expectedTf = null
     await new Promise(r => setTimeout(r, POLL_INTERVAL));
   }
 
-  // Timeout — return true anyway, caller should verify
+  // Timed out without ever observing the requested state.
   return false;
 }
 
@@ -77,7 +87,7 @@ export async function waitForChartReady(expectedSymbol = null, expectedTf = null
  * stale frame (issue #144). Waits for any loading spinner to clear, then for
  * the symbol/resolution/canvas signature to hold stable across 3 polls.
  */
-export async function waitForChartRender(timeout = 5000) {
+export async function waitForChartRender(timeout = 5000, evaluate = _evaluate) {
   const start = Date.now();
   let lastSignature = null;
   let stableCount = 0;

@@ -90,30 +90,71 @@ export async function setVisibleRange({ from, to, _deps }) {
     await new Promise(r => setTimeout(r, 1800));
   }
 
-  await evaluate(`
+  // Select and zoom ONLY if the loaded bars actually cover the request
+  // (contract C4). Zooming to the nearest available bars would answer a
+  // question the caller did not ask with data they did not request — the
+  // silent substitution this contract exists to forbid.
+  const sel = await evaluate(`
     (function() {
       var chart = ${CHART_API};
       var m = chart._chartWidget.model();
-      var ts = m.timeScale();
       var bars = m.mainSeries().bars();
-      var startIdx = bars.firstIndex();
-      var endIdx = bars.lastIndex();
-      var fromIdx = startIdx, toIdx = endIdx;
+      var startIdx = bars.firstIndex(), endIdx = bars.lastIndex();
+      var fromIdx = null, toIdx = null, hasLeft = false, hasRight = false, inWindow = false;
       for (var i = startIdx; i <= endIdx; i++) {
         var v = bars.valueAt(i);
-        if (v && v[0] >= ${f} && fromIdx === startIdx) fromIdx = i;
-        if (v && v[0] <= ${t}) toIdx = i;
+        if (!v) continue;
+        if (v[0] <= ${f}) { hasLeft = true; fromIdx = i; }          // last bar at/before from
+        if (v[0] >= ${t}) { hasRight = true; if (toIdx === null) toIdx = i; } // first bar at/after to
+        if (v[0] >= ${f} && v[0] <= ${t}) inWindow = true;
       }
-      ts.zoomToBarsRange(fromIdx, toIdx);
+      // Covered = loaded data spans the request, or part of the request has bars.
+      if (!((hasLeft && hasRight) || inWindow)) return { covered: false };
+      if (fromIdx === null) fromIdx = startIdx;
+      if (toIdx === null) toIdx = endIdx;
+      if (toIdx < fromIdx) toIdx = fromIdx;
+      m.timeScale().zoomToBarsRange(fromIdx, toIdx);
+      return { covered: true, fromIdx: fromIdx, toIdx: toIdx };
     })()
   `);
+
+  if (!sel || !sel.covered) {
+    return {
+      success: false,
+      requested: { from, to },
+      actual: { from: null, to: null },
+      note: 'The requested window is not covered by the chart\'s loaded bars, so the view was left where it was rather than moved to the nearest available data. Widen the window, or load more history, then retry.',
+    };
+  }
+
   await new Promise(r => setTimeout(r, 500));
   const actual = await evaluate(`
     (function() {
       var chart = ${CHART_API};
-      try { var r = chart.getVisibleRange(); return { from: r.from || 0, to: r.to || 0 }; }
-      catch(e) { return { from: 0, to: 0, error: e.message }; }
+      try {
+        var r = chart.getVisibleRange();
+        // Number.isFinite, and NEVER a || 0 fallback (contract C3): epoch 0 is a
+        // real instant, so masking an unreadable endpoint to 0 would make
+        // "unknown" indistinguishable from a legitimate answer.
+        return { from: (r && Number.isFinite(r.from)) ? r.from : null,
+                 to:   (r && Number.isFinite(r.to))   ? r.to   : null };
+      } catch(e) { return { from: null, to: null, error: e.message }; }
     })()
   `);
-  return { success: true, requested: { from, to }, actual: actual || { from: 0, to: 0 } };
+
+  const from_ = actual ? actual.from : null;
+  const to_ = actual ? actual.to : null;
+  // success = the read-back range was OBSERVED to contain the request
+  // (contract C2). No cadence, no padding, no forming-bar inference: this may
+  // false-NEGATIVE when the UI snaps the view, and that is the acceptable
+  // direction. It must never false-positive.
+  const success = Number.isFinite(from_) && Number.isFinite(to_) && from_ <= f && to_ >= t;
+  const result = { success, requested: { from, to }, actual: { from: from_, to: to_ } };
+  if (!success) {
+    result.note = (from_ === null || to_ === null)
+      ? 'The chart did not return a readable visible range, so the zoom could not be confirmed. Retry once the chart is loaded.'
+      : 'The visible range the chart reported does not contain the requested window, so the zoom is unconfirmed (the view may not have moved). Retry once the chart is loaded.';
+    if (actual && actual.error) result.error = actual.error;
+  }
+  return result;
 }

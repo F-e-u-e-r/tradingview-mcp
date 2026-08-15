@@ -24,7 +24,7 @@ This is not the general-purpose bridge. The upstream project exposes 84 tools in
 | `chart_set_symbol` | Switch to the trade's instrument |
 | `chart_set_timeframe` | Switch to the trade's resolution (enum) |
 | `chart_set_visible_range` | Jump/zoom to the trade's time window (pages in older history) |
-| `data_get_ohlcv` | Price context (summary by default) |
+| `data_get_ohlcv` | Price context. Pass `from`+`to` for a specific window (required for reviewing a past trade); omit both for the newest bars |
 | `capture_screenshot` | Screenshot to `generated/screenshots/` (fixed path) |
 
 Chart annotation (`draw_shape` / `draw_clear`) is **not in this release**. Removing an annotation safely requires proving which drawings this session created; across TradingView layout switches that ownership could not be established reliably, and a clear that cannot prove ownership deletes the user's own drawings. The capability returns with a contract that can be proven, not with a caveat.
