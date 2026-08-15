@@ -210,6 +210,55 @@ than folded in silently.
 Also left alone deliberately: the history-paging loop still defaults `more = true` when
 `requestMoreDataAvailable()` throws, and `capture.js`/render-stability were not touched.
 
+### Round-1 review remediation (2026-08-16)
+
+Two independent GPT-family reviews of the contract commit at `max` effort. One returned
+PROCEED; the other returned a C1 counterexample that reproduced, and it is fixed here.
+
+- **C1 boundary defect (BLOCKING, fixed).** `data_get_ohlcv`'s new `from`/`to` used
+  `z.coerce.number()`, which routes every value through `Number()`. zod's `.optional()`
+  short-circuits only `undefined`, so `from: null` — how a client ordinarily says "not
+  specified" — became epoch **0**. Core's half-window guard tests for absence and
+  therefore could never fire. On a real chart `{from: null, to: <newest bar>}` returned
+  `success:true, mode:'window', requested_window:{from:0,…}` carrying the OLDEST loaded
+  bars: the C1 substitution, mirrored. Decision: the boundary now accepts exactly two
+  representations — an integer, or a string that is unambiguously one — and rejects
+  everything else. Rejected alternative: enforcing it only in core. Why: core cannot
+  distinguish absence from an invented value once the schema has already invented it.
+  The split is **boundary rejects a malformed representation; core enforces the temporal
+  contract** — core's pair/ordering/membership checks are unchanged and still tested.
+- **The test seam that hid it (fixed).** Every C1 test called `getOhlcv()` directly, so
+  `registerDataTools` was never exercised. `tests/mcp_boundary.test.js` dispatches
+  through a real `McpServer` + `InMemoryTransport` + `Client`. Rejections are asserted
+  end-to-end (they short-circuit before the handler, so they are fast); the accepted
+  cases are asserted against the registered schema, plus ONE deliberate end-to-end call
+  that covers the SDK's own normalize+parse of the new schema type and pays the CDP
+  retry budget. Epoch 0, the latest mode, numeric strings, and negative values are
+  pinned so the fix cannot overcorrect. Written RED first: 5 failed, 8 passed.
+- **Accidental delta reverted.** The C5 rewrite silently dropped the
+  `[class*="loading"]` spinner selector from `waitForChartReady` (unmentioned in the
+  commit message; `waitForChartRender` in the same file kept all three). Restored to the
+  parent's behaviour rather than deferred — it was never part of the identity contract.
+
+Recorded, NOT fixed here (out of the authorized scope):
+
+- `chart_set_visible_range` has the same `null → 0` coercion at `src/tools/chart.js`.
+  It is PRE-EXISTING (that file is untouched by the contract commit) and the C4 coverage
+  check made its outcome strictly better — measured: 25 paging rounds (~45s) then a
+  correct `success:false`, where the parent returned `success:true`. Belongs to the
+  chart-tool domain, not C1–C5.
+- `count` shares the coercion shape but fails closed on `null` via `.min(1)`.
+  `src/tools/drawing.js` shares it too and is not registered by `src/server.js`.
+- **C5 identity normalization is OPEN EVIDENCE, not an adjudicated defect.** The exact
+  symbol match rejects the bare tickers `chart_set_symbol`'s own schema advertises
+  (`'e.g., BTCUSD, AAPL'`): measured `setSymbol('AAPL')` → `chart_ready:false` after a
+  full 10s timeout, versus `setSymbol('NASDAQ:AAPL')` → `true` in 0.9s; the parent's
+  substring test accepted both. This rests on an UNVERIFIED premise — that TradingView's
+  `chart.symbol()` returns the qualified form — and the same question applies to
+  `resolution()` (`'D'` vs `'1D'`). Before the next SHA freeze, characterize against the
+  live app: requested value → actual `symbol()`/`resolution()`. Measure ground truth
+  first; do not invent a normalization from a guess.
+
 ## Taking upstream updates (required procedure)
 
 1. `git fetch upstream` and read the full diff: `git diff c05b8f5755ed..upstream/main`.

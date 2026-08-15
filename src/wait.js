@@ -20,7 +20,12 @@ export async function waitForChartReady(expectedSymbol = null, expectedTf = null
       (function() {
         var out = { loading: false, symbol: null, resolution: null, barCount: -1 };
         try {
+          // All THREE selectors, matching waitForChartRender below. The rewrite
+          // for C5 dropped '[class*="loading"]' with no reason given; that was an
+          // accidental narrowing of spinner detection, not part of the identity
+          // contract, so it is restored rather than redesigned here.
           var spinner = document.querySelector('[class*="loader"]')
+            || document.querySelector('[class*="loading"]')
             || document.querySelector('[data-name="loading"]');
           out.loading = !!(spinner && spinner.offsetParent !== null);
         } catch (e) {}
