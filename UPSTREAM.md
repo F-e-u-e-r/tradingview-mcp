@@ -93,8 +93,16 @@ transplanted onto the pre-hardening base rather than cherry-picked as whole comm
   CRITICAL where a rogue `:9222` answers the upgrade with a 3xx and ws silently
   follows it off-host;
 - the control fetch uses `redirect:'manual'` and is pinned to the loopback endpoint;
-- module singletons commit only after the guard and every enable pass, so a
-  guard-refused target is never served.
+- `targetInfo` is committed only after the debugger URL passed the loopback check,
+  so `getTargetInfo()` can never serve a target this file refused, and a guard
+  refusal closes and clears the client singleton.
+
+  Stated precisely because a looser version of this claim was wrong when first
+  written here: a post-guard `Runtime.enable` failure DOES leave the client
+  singleton set. That is a lifecycle defect (it was fixed as F6 in the abandoned
+  campaign) and it is deliberately NOT transplanted — it is out of this branch's
+  scope, and it is not a loopback violation, because the guard has already proven
+  the peer is loopback before any enable runs.
 
 Architectural change made here, and NOT carried from the campaign: **no production
 module can obtain a raw CDP client.** `getClient` is module-private; callers get

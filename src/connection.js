@@ -1,4 +1,57 @@
 import CDP from 'chrome-remote-interface';
+import CDPChrome from 'chrome-remote-interface/lib/chrome.js';
+import WebSocket from 'ws';
+
+// ── The ONE piece of chrome-remote-interface internal coupling in this build ──
+//
+// CRI creates its WebSocket with `followRedirects: true` hardcoded and offers no
+// override hook. ws's own documented client default is FALSE — CRI actively
+// opts INTO redirect following. The consequence: a rogue listener on the pinned
+// loopback port can answer the upgrade with a 3xx, and ws will dial the
+// Location. The WebSocket upgrade request — including the debugger target path —
+// is then delivered to a host of the attacker's choosing. Validating the socket
+// afterwards, which is what assertLoopbackSocket does, cannot unsend it.
+//
+// TradingView's DevTools endpoint never redirects, so refusing to follow one is
+// fail-closed at no legitimate cost: any 3xx is now a connection failure.
+//
+// This replaces exactly one method and changes exactly one option. Two things
+// keep the coupling honest:
+//   1. If the method is gone, this module REFUSES TO LOAD rather than silently
+//      reverting to upstream's redirect-following behaviour.
+//   2. The upstream body being replaced is pinned by tests/loopback.test.js
+//      against the installed source, so an upstream change fails the suite
+//      loudly instead of leaving this override quietly shipping stale logic.
+// chrome-remote-interface and ws are EXACT-pinned in package.json for the same
+// reason: this is version-specific code.
+if (typeof CDPChrome.prototype._connectToWebSocket !== 'function') {
+  throw new Error(
+    'chrome-remote-interface changed: Chrome.prototype._connectToWebSocket is missing, '
+    + 'so the no-redirect override cannot be applied. Refusing to load rather than '
+    + 'silently following WebSocket redirects off loopback.',
+  );
+}
+CDPChrome.prototype._connectToWebSocket = function _connectToWebSocketNoRedirect() {
+  return new Promise((fulfill, reject) => {
+    try {
+      if (this.secure) {
+        this.webSocketUrl = this.webSocketUrl.replace(/^ws:/i, 'wss:');
+      }
+      this._ws = new WebSocket(this.webSocketUrl, [], {
+        maxPayload: 256 * 1024 * 1024,
+        perMessageDeflate: false,
+        followRedirects: false, // ← the only change from upstream
+      });
+    } catch (err) {
+      reject(err); // handles bad URLs
+      return;
+    }
+    this._ws.on('open', () => { fulfill(); });
+    this._ws.on('message', (data) => { this._handleMessage(JSON.parse(data)); });
+    this._ws.on('close', () => { this._handleConnectionClose(); this.emit('disconnect'); });
+    this._ws.on('error', (err) => { reject(err); });
+  });
+};
 import { parse as legacyParse } from 'node:url';
 
 let client = null;
@@ -177,11 +230,23 @@ export function assertLoopbackSocket(client) {
 // _deps injects the CDP factory, target finder, retry budget, and delay so a
 // test can drive the real ordering (guard BEFORE any command) without a live
 // Chrome; production passes nothing and uses the real implementations.
-export async function connect(_deps = {}) {
-  const cdp = _deps.CDP || CDP;
-  const findTarget = _deps.findChartTarget || findChartTarget;
-  const maxRetries = _deps.maxRetries ?? MAX_RETRIES;
-  const baseDelay = _deps.baseDelay ?? BASE_DELAY;
+// PRIVATE, and takes no injection. Exporting this handed out a raw CDP client;
+// accepting an injected `CDP` factory handed out the ability to REPLACE the
+// transport entirely, which would have made every check in this file advisory.
+// A production module gets the narrow operations below and nothing else — the
+// loopback guarantee is a property of how this file dials, so nothing outside
+// it may dial or supply a dialer.
+//
+// There is deliberately no test-only escape hatch: anything exported here is
+// importable by production code, so a `__testConnect` would be the same hole
+// under a different name. The loopback behaviour is proven instead by driving
+// real listeners (tests/loopback.test.js), which exercises the shipped dial
+// path including the no-redirect override above.
+async function connect() {
+  const cdp = CDP;
+  const findTarget = findChartTarget;
+  const maxRetries = MAX_RETRIES;
+  const baseDelay = BASE_DELAY;
   let lastError;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {

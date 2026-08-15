@@ -9,18 +9,20 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { readFileSync } from 'node:fs';
 import pkg from 'ws';
 import CDP from 'chrome-remote-interface';
+// Importing the module APPLIES the no-redirect override to CRI's prototype, so
+// the CDP() calls below exercise the shipped dial path — not a copy of it.
 import {
   isLoopbackWsUrl,
   isTradingViewChartUrl,
   isLoopbackAddr,
   assertLoopbackSocket,
-  connect,
-  disconnect,
 } from '../src/connection.js';
 
 const WebSocketServer = pkg.Server || pkg.WebSocketServer;
+const { default: CDPChromeProto } = await import('chrome-remote-interface/lib/chrome.js');
 // Reject (not hang) if the sandbox blocks a loopback bind, so a failed bind
 // surfaces as a test error instead of a pending before-hook (luna #14).
 const listen = (server) => new Promise((res, rej) => {
@@ -127,16 +129,21 @@ describe('assertLoopbackSocket — refuses redirected / off-host sockets', () =>
 
 // ── REAL redirect: a rogue :port that 302s the WS handshake to another host ─
 
-describe('CDP WebSocket handshake redirect (real chrome-remote-interface + ws)', () => {
-  let aHttp, bHttp, wss, portA, portB, bGotConnection;
+describe('CDP WebSocket redirect — the redirect target receives NOTHING', () => {
+  let aHttp, bHttp, wss, portA, portB, bConnections;
 
   before(async () => {
-    bGotConnection = false;
+    bConnections = 0;
+    // Server B is the redirect TARGET. In production this is wherever the
+    // attacker points us — the whole question is whether it hears from us.
     bHttp = http.createServer();
     wss = new WebSocketServer({ server: bHttp });
-    wss.on('connection', (ws) => { bGotConnection = true; ws.on('message', () => {}); });
+    wss.on('connection', (ws) => { bConnections++; ws.on('message', () => {}); });
+    bHttp.on('upgrade', () => { /* counted via wss connection */ });
     portB = await listen(bHttp);
 
+    // Server A is the rogue listener on the pinned port: it answers the
+    // WebSocket upgrade with a 302 pointing at B.
     aHttp = http.createServer();
     aHttp.on('upgrade', (req, socket) => {
       socket.write('HTTP/1.1 302 Found\r\n' + `Location: ws://127.0.0.1:${portB}/devtools/page/EXFIL\r\n` + 'Connection: close\r\n\r\n');
@@ -146,84 +153,133 @@ describe('CDP WebSocket handshake redirect (real chrome-remote-interface + ws)',
   });
 
   after(() => {
-    try { wss.close(); } catch {}
-    try { aHttp.close(); } catch {}
-    try { bHttp.close(); } catch {}
+    try { wss.close(); } catch { /* ignore */ }
+    try { aHttp.close(); } catch { /* ignore */ }
+    try { bHttp.close(); } catch { /* ignore */ }
   });
 
-  it('the shipped guard refuses a connection that was redirected off the verified URL', { timeout: 15000 }, async () => {
-    // (integration; skipped implicitly if the sandbox blocks binds — see before)
-    // Loopback host on an ephemeral port (the 9222 pin is exercised separately;
-    // a test can't bind the privileged fixed port). What this exercises is the
-    // handshake-redirect guard, which is port-independent.
+  it('a 3xx on the CDP upgrade is a connection FAILURE — nothing is sent to the redirect target', { timeout: 15000 }, async () => {
+    // This is the load-bearing assertion of this branch. The previous form of
+    // this test asserted that B DID receive the redirected socket and that the
+    // guard then refused the client — which proved the guard worked while
+    // conceding that the upgrade request, including the debugger target path,
+    // had already been delivered to a host of the attacker's choosing. A
+    // security boundary that fires after the request is sent is not a boundary
+    // for the request. Refusing to follow the redirect is.
     const verifiedWsUrl = `ws://127.0.0.1:${portA}/devtools/page/LOOKS-LOOPBACK`;
 
-    let client;
+    let client = null;
+    let dialError = null;
     try {
       client = await CDP({ host: '127.0.0.1', port: portA, target: verifiedWsUrl, local: true });
-      // The ws transport followed the 302 to server B (the vulnerability). The
-      // guard MUST catch it before any command is issued.
-      assert.ok(client._ws._redirects > 0, 'precondition: ws followed the redirect (else the vuln did not reproduce)');
-      assert.equal(bGotConnection, true, 'precondition: server B received the redirected socket');
-      assert.throws(() => assertLoopbackSocket(client), /redirect/i, 'guard must refuse the redirected client');
+    } catch (err) {
+      dialError = err;
     } finally {
-      try { await client?.close(); } catch {}
+      try { await client?.close(); } catch { /* ignore */ }
     }
+
+    assert.ok(dialError, 'a redirected upgrade must FAIL the dial, not be followed and then refused');
+    assert.match(String(dialError.message), /30[12378]|redirect|unexpected server response/i,
+      `the failure must be the refused redirect (got: ${dialError.message})`);
+    // Give any followed connection a chance to land before asserting absence.
+    await new Promise(r => setTimeout(r, 250));
+    assert.equal(bConnections, 0,
+      'THE invariant: the redirect target must receive ZERO connections — no upgrade, no metadata, nothing');
+  });
+
+  it('a DIRECT loopback endpoint still connects and passes the guard (no over-blocking)', { timeout: 15000 }, async () => {
+    // The override must refuse redirects without breaking the normal path.
+    const okHttp = http.createServer();
+    const okWss = new WebSocketServer({ server: okHttp });
+    okWss.on('connection', (ws) => { ws.on('message', () => {}); });
+    const okPort = await listen(okHttp);
+    let client = null;
+    try {
+      client = await CDP({ host: '127.0.0.1', port: okPort, target: `ws://127.0.0.1:${okPort}/devtools/page/OK`, local: true });
+      assert.equal(client._ws._redirects, 0, 'a direct dial follows no redirects');
+      assert.doesNotThrow(() => assertLoopbackSocket(client), 'a direct loopback peer must pass the guard');
+    } finally {
+      try { await client?.close(); } catch { /* ignore */ }
+      try { okWss.close(); } catch { /* ignore */ }
+      try { okHttp.close(); } catch { /* ignore */ }
+    }
+  });
+
+  it('the CRI internal this override replaces is PINNED — an upstream change fails here, loudly', () => {
+    // The override copies one upstream method and flips one option. If upstream
+    // edits that method, this build would silently ship stale logic; if upstream
+    // stops hardcoding the option, the override is no longer needed and the
+    // coupling should be dropped. Either way a human must look, so pin the
+    // installed source rather than trusting the version range.
+    const criSrc = readFileSync(
+      new URL('../node_modules/chrome-remote-interface/lib/chrome.js', import.meta.url), 'utf8',
+    );
+    const body = criSrc.slice(criSrc.indexOf('_connectToWebSocket() {'));
+    assert.ok(body.startsWith('_connectToWebSocket() {'), 'upstream no longer defines _connectToWebSocket');
+    const method = body.slice(0, body.indexOf('\n    }') + 6);
+    assert.match(method, /followRedirects:\s*true/,
+      'upstream no longer hardcodes followRedirects:true — re-derive or drop the override in src/connection.js');
+    assert.match(method, /maxPayload:\s*256 \* 1024 \* 1024/, 'upstream ws options changed — re-derive the override');
+    assert.match(method, /perMessageDeflate:\s*false/, 'upstream ws options changed — re-derive the override');
+    for (const handler of ["on\\('open'", "on\\('message'", "on\\('close'", "on\\('error'"]) {
+      assert.match(method, new RegExp(handler), `upstream event wiring changed (${handler}) — re-derive the override`);
+    }
+    // And the shipped module must actually have replaced it.
+    assert.equal(CDPChromeProto.prototype._connectToWebSocket.name, '_connectToWebSocketNoRedirect',
+      'the no-redirect override is not installed on the shipped CRI prototype');
   });
 });
 
-// ── connect() ORDERING: the guard runs before any CDP command (sol #1/luna #3) ─
-// This drives the production connect() with an injected CDP factory, so moving
-// or deleting assertLoopbackSocket() in connect() — the actual regression the
-// manual-guard test above cannot catch — fails here. No socket bind needed.
+// ── connect() ORDERING and the capability surface ─────────────────────────
+// connect() is module-private now and takes no injected dialer, so these can no
+// longer drive it with a fake CDP factory — that seam WAS the capability hole.
+// What replaces it: the guard's behaviour is proven against real listeners
+// above and by the predicate tests, and its ORDERING inside connect() is pinned
+// against the shipped source here. A source pin is weaker evidence than driving
+// the function, and it is the honest cost of removing the injection surface.
 
-describe('connect() — guard precedes any CDP command', () => {
-  const okTarget = async () => ({
-    id: 'T', url: 'https://www.tradingview.com/chart/x/',
-    webSocketDebuggerUrl: 'ws://127.0.0.1:9222/devtools/page/x',
-  });
-  function fakeClient(over) {
-    const calls = [];
-    const mk = (name) => async () => { calls.push(name); };
-    return {
-      calls,
-      client: {
-        _ws: over._ws,
-        Runtime: { enable: mk('Runtime.enable') },
-        Page: { enable: mk('Page.enable') },
-        DOM: { enable: mk('DOM.enable') },
-        close: mk('close'),
-      },
-    };
-  }
+describe('connection.js — capability surface and guard ordering', () => {
+  const src = readFileSync(new URL('../src/connection.js', import.meta.url), 'utf8');
 
-  after(async () => { try { await disconnect(); } catch {} });
-
-  it('refuses a redirected client and issues ZERO commands, tearing it down', async () => {
-    const f = fakeClient({ _ws: { _redirects: 1, _socket: { remoteAddress: '203.0.113.9' } } });
-    await assert.rejects(
-      () => connect({ findChartTarget: okTarget, CDP: async () => f.client, maxRetries: 1, baseDelay: 0 }),
-      /redirect|confirmed zero/i,
-    );
-    assert.ok(!f.calls.includes('Runtime.enable'), 'no CDP command may run before the guard rejects');
-    assert.ok(!f.calls.includes('Page.enable'));
-    assert.ok(f.calls.includes('close'), 'the refused client is torn down');
+  it('exports NO raw-client producer and NO transport replacement seam', async () => {
+    const mod = await import('../src/connection.js');
+    for (const forbidden of ['connect', 'getClient', '_dialCDP', '_fetchControl', 'setDeps', '_internals']) {
+      assert.equal(mod[forbidden], undefined,
+        `${forbidden} must not be exported — a production module could obtain or replace the CDP transport through it`);
+    }
+    // What production code MAY have: narrow operations only.
+    for (const allowed of ['ensureConnected', 'capturePage', 'evaluate', 'evaluateAsync', 'disconnect', 'getTargetInfo']) {
+      assert.equal(typeof mod[allowed], 'function', `${allowed} is part of the narrow surface`);
+    }
   });
 
-  it('enables domains only AFTER the guard passes for a loopback client', async () => {
-    const f = fakeClient({ _ws: { _redirects: 0, _socket: { remoteAddress: '127.0.0.1' } } });
-    const c = await connect({ findChartTarget: okTarget, CDP: async () => f.client, maxRetries: 1, baseDelay: 0 });
-    assert.equal(c, f.client);
-    assert.deepEqual(f.calls, ['Runtime.enable', 'Page.enable', 'DOM.enable'], 'guard passed, then domains enabled in order');
+  it('connect() accepts no injected dialer, target finder, or retry budget', () => {
+    const body = src.slice(src.indexOf('async function connect()'));
+    assert.ok(src.includes('async function connect()'),
+      'connect must take NO parameters — an options bag is a transport replacement seam');
+    assert.ok(!/^export async function connect/m.test(src), 'connect must not be exported');
+    assert.ok(!/_deps\.CDP|_deps\.findChartTarget/.test(body.slice(0, 2000)),
+      'no injected dialer or target finder may remain');
   });
 
-  it('refuses a non-loopback peer even with zero redirects, issuing zero commands', async () => {
-    const f = fakeClient({ _ws: { _redirects: 0, _socket: { remoteAddress: '8.8.8.8' } } });
-    await assert.rejects(
-      () => connect({ findChartTarget: okTarget, CDP: async () => f.client, maxRetries: 1, baseDelay: 0 }),
-      /not loopback/i,
-    );
-    assert.ok(!f.calls.includes('Runtime.enable'));
-    assert.ok(f.calls.includes('close'));
+  it('the loopback guard precedes every CDP command inside connect()', () => {
+    const body = src.slice(src.indexOf('async function connect()'), src.indexOf('async function fetchTargets'));
+    const guardAt = body.indexOf('assertLoopbackSocket(');
+    assert.ok(guardAt > -1, 'connect() must call assertLoopbackSocket');
+    for (const cmd of ['Runtime.enable', 'Page.enable', 'DOM.enable']) {
+      const at = body.indexOf(cmd);
+      assert.ok(at > -1, `connect() should still enable ${cmd}`);
+      assert.ok(guardAt < at, `assertLoopbackSocket must run BEFORE ${cmd}`);
+    }
+    // targetInfo is committed only after the URL passed isLoopbackWsUrl, so
+    // getTargetInfo() can never serve a target this file refused. (The client
+    // singleton is assigned the dial result directly and is nulled+closed if the
+    // guard refuses; a post-guard ENABLE failure leaves it set — that is the
+    // lifecycle issue recorded as out of scope for this branch, not a loopback
+    // boundary violation, since the guard has already proven the peer.)
+    assert.ok(body.indexOf('isLoopbackWsUrl(') < body.indexOf('targetInfo = target'),
+      'targetInfo must be committed only after the debugger URL passed the loopback check');
+    assert.ok(body.indexOf('client = null') > guardAt,
+      'a guard refusal must clear the client singleton');
   });
 });
