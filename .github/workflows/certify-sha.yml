@@ -1,0 +1,173 @@
+name: certify-sha
+
+# CI2 — exact/frozen-SHA certification (issue #4).
+#
+# An operator names ONE immutable commit SHA; this workflow produces durable
+# evidence about it. It is NOT PR gating: pull-request CI (ci.yml) correctly
+# tests GitHub's prepared merge result (refs/pull/N/merge). Neither replaces
+# the other.
+#
+# ── TWO-LAYER TRUST CONTRACT (read before quoting a certification) ──────────
+#
+# This instrument makes two claims of DIFFERENT strength; do not conflate them.
+#
+#  1. GATE-RESULT trust — ASSUMES A TRUSTED / REVIEWED TARGET SHA.
+#     The `gates` job runs the TARGET's OWN repository gates (its package.json
+#     scripts, its lint config, its tests). A hostile or unreviewed target can
+#     therefore fake its own gate results — `"test": "exit 0"`, a fake test
+#     runner, or manipulating its own working directory. No workflow structure
+#     can prevent this; it is the universal property of running a commit's own
+#     gates. So a green `gates` result means "the target-defined gates reported
+#     success" ONLY to the extent the target is trusted. This workflow does NOT
+#     prove that an arbitrary untrusted SHA is correct.
+#
+#  2. IDENTITY / PROVENANCE binding — INDEPENDENT OF TARGET-CODE EXECUTION.
+#     The authoritative certification is emitted by the dedicated `certify`
+#     job, which runs on a fresh runner and executes NO target repository code
+#     (no npm ci, no lint, no test). It re-derives the target ONLY from the
+#     original dispatch input (never from the gates job's env/path/outputs),
+#     re-validates it, checks it out, and asserts HEAD == target before
+#     emitting the marker. This binding does not depend on the target's code —
+#     but it is NOT unconditional: it still trusts the certifier workflow
+#     revision and the GitHub Actions/runner/action dependencies themselves.
+#
+# ── PROVENANCE ACCEPTANCE RULE ──────────────────────────────────────────────
+# A certifier source ref/revision (github.workflow_sha / github.workflow_ref)
+# and the target SHA are DIFFERENT commits: workflow revision X certifies tree
+# Y. Only runs whose certifier revision is an ACCEPTED/trusted one count as CI2
+# evidence — canonically, dispatch from the workflow on the default branch. A
+# modified certify-sha.yml on another branch is a DIFFERENT instrument even if
+# it prints the same words; the marker records certifier_sha/certifier_ref so a
+# reader can tell. (This is a provenance rule, not an actor allowlist.)
+#
+# ── AUTHORITATIVE MARKER ────────────────────────────────────────────────────
+# ONLY the terminal `CERTIFY-OK v=1 job=certify …` line from the `certify`
+# job is authoritative. A hostile target's gate output can print a look-alike
+# line to stdout in the `gates` job; that is not the certify job and does not
+# count. A certification requires: both Node legs of `gates` succeeded AND the
+# `certify` job emitted its marker. No marker (timeout, crash, cancel, or a red
+# gate leg — `certify` needs `gates`) means NOT certified.
+#
+# Design/platform facts (issue #4 orientation, hosted run 32487134086, plus
+# the remediation harness): workflow_dispatch requires the definition on the
+# default branch; raw-SHA checkout succeeds for non-tip ancestors and
+# never-merged PR heads with no extra fetch depth; a nonexistent SHA fails
+# closed at checkout; abbreviated SHAs and refs are rejected before checkout;
+# $GITHUB_ENV / $GITHUB_PATH mutations are per-job and never reach another job.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_sha:
+        description: 'FULL 40-character lowercase commit SHA to certify'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Layer 0: fail closed on a malformed identity before anything runs ──────
+  validate-input:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject anything but one full 40-char lowercase hex SHA
+        env:
+          # Input enters ONLY through env, never interpolated into shell source.
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          if [[ ! "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            printf 'REJECTED: target_sha must be one full 40-char lowercase hex commit SHA; got: %s\n' "$TARGET_SHA"
+            exit 1
+          fi
+          printf 'input form OK\n'
+
+  # ── Layer 1: run the TARGET's own gates (executes target code) ─────────────
+  gates:
+    needs: validate-input
+    runs-on: ubuntu-latest
+    strategy:
+      # Both runtimes report independently: a green 20.x must not cancel-hide
+      # a red 22.x.
+      fail-fast: false
+      matrix:
+        node-version: [20.x, 22.x]
+    env:
+      TARGET_SHA: ${{ inputs.target_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_sha }}
+          persist-credentials: false
+
+      - name: Assert HEAD is the target before installing anything
+        run: |
+          echo "HEAD     = $(git rev-parse HEAD)"
+          echo "expected = ${TARGET_SHA}"
+          test "$(git rev-parse HEAD)" = "${TARGET_SHA}"
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install dependencies (no lifecycle scripts)
+        run: npm ci --ignore-scripts
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Tests
+        run: npm test
+
+      - name: Integrity signal — HEAD unchanged after gates
+        # A useful signal, NOT anti-forgery proof: target code ran in this job,
+        # so nothing here is trustworthy against a hostile target. The
+        # authoritative binding is the target-code-free `certify` job below.
+        run: test "$(git rev-parse HEAD)" = "${TARGET_SHA}"
+
+  # ── Layer 2: authoritative, target-code-free identity/provenance binding ───
+  certify:
+    needs: gates
+    runs-on: ubuntu-latest
+    env:
+      # Target is re-derived ONLY from the original dispatch input — never from
+      # gates' outputs/env/path. All context values reach shell through env and
+      # are printed as data (quoted), never interpolated into shell source.
+      TARGET_SHA: ${{ inputs.target_sha }}
+      CERTIFIER_SHA: ${{ github.workflow_sha }}
+      CERTIFIER_REF: ${{ github.workflow_ref }}
+      RUN_ID: ${{ github.run_id }}
+    steps:
+      - name: Re-validate the input independently (carry no trust from gates)
+        run: |
+          if [[ ! "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            printf 'REJECTED at certify: %s\n' "$TARGET_SHA"
+            exit 1
+          fi
+
+      - name: Provenance — certifier revision vs certified target (data only)
+        run: |
+          printf 'certifier_sha = %s\n' "$CERTIFIER_SHA"
+          printf 'certifier_ref = %s\n' "$CERTIFIER_REF"
+          printf 'run_id        = %s\n' "$RUN_ID"
+          printf 'target        = %s\n' "$TARGET_SHA"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_sha }}
+          persist-credentials: false
+
+      # No setup-node, no npm ci, no lint, no test: this job runs NO target code.
+
+      - name: Bind identity — assert HEAD is exactly the target
+        run: |
+          echo "HEAD     = $(git rev-parse HEAD)"
+          echo "expected = ${TARGET_SHA}"
+          test "$(git rev-parse HEAD)" = "${TARGET_SHA}"
+
+      - name: Authoritative certification marker
+        run: |
+          printf 'CERTIFY-OK v=1 job=certify target=%s head=%s certifier_sha=%s certifier_ref=%s run=%s\n' \
+            "$TARGET_SHA" "$(git rev-parse HEAD)" "$CERTIFIER_SHA" "$CERTIFIER_REF" "$RUN_ID"
