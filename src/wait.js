@@ -5,6 +5,45 @@ const CHART_API = KNOWN_PATHS.chartApi;
 const DEFAULT_TIMEOUT = 10000;
 const POLL_INTERVAL = 200;
 
+// Issue #2: loading is present iff at least one candidate matching any
+// supported loading selector is observably visible. The previous first-match
+// querySelector chain let a hidden candidate mask a visible one (across
+// selectors, and equally within a single selector), and `offsetParent !== null`
+// misreads visible position:fixed overlays as hidden. The selector set itself
+// is unchanged. Exported so tests can pin that BOTH wait functions embed this
+// exact primitive rather than re-growing private copies.
+export const LOADING_PROBE_JS = `
+  (function() {
+    var sels = ['[class*="loader"]', '[class*="loading"]', '[data-name="loading"]'];
+    function visible(el) {
+      if (typeof el.checkVisibility === 'function') {
+        // Older Chromium spells these options checkVisibilityCSS/checkOpacity;
+        // the current spec spells them visibilityProperty/opacityProperty.
+        // Unknown dictionary members are ignored, so pass both generations.
+        return el.checkVisibility({
+          visibilityProperty: true, opacityProperty: true,
+          checkVisibilityCSS: true, checkOpacity: true
+        });
+      }
+      if (el.getClientRects().length === 0) return false;
+      for (var n = el; n; n = n.parentElement) {
+        var cs = getComputedStyle(n);
+        if (cs.display === 'none' || cs.visibility === 'hidden'
+          || cs.visibility === 'collapse' || parseFloat(cs.opacity) === 0
+          || cs.contentVisibility === 'hidden') return false;
+      }
+      return true;
+    }
+    for (var i = 0; i < sels.length; i++) {
+      var nodes = document.querySelectorAll(sels[i]);
+      for (var j = 0; j < nodes.length; j++) {
+        if (visible(nodes[j])) return true;
+      }
+    }
+    return false;
+  })()
+`;
+
 export async function waitForChartReady(expectedSymbol = null, expectedTf = null, timeout = DEFAULT_TIMEOUT, evaluate = _evaluate) {
   const start = Date.now();
   let lastBarCount = -1;
@@ -20,14 +59,7 @@ export async function waitForChartReady(expectedSymbol = null, expectedTf = null
       (function() {
         var out = { loading: false, symbol: null, resolution: null, barCount: -1 };
         try {
-          // All THREE selectors, matching waitForChartRender below. The rewrite
-          // for C5 dropped '[class*="loading"]' with no reason given; that was an
-          // accidental narrowing of spinner detection, not part of the identity
-          // contract, so it is restored rather than redesigned here.
-          var spinner = document.querySelector('[class*="loader"]')
-            || document.querySelector('[class*="loading"]')
-            || document.querySelector('[data-name="loading"]');
-          out.loading = !!(spinner && spinner.offsetParent !== null);
+          out.loading = ${LOADING_PROBE_JS};
         } catch (e) {}
         try {
           var chart = ${CHART_API};
@@ -110,13 +142,11 @@ export async function waitForChartRender(timeout = 5000, evaluate = _evaluate) {
           symbol = chart.symbol();
           resolution = chart.resolution();
         } catch(e) {}
-        var spinner = document.querySelector('[class*="loader"]')
-          || document.querySelector('[class*="loading"]')
-          || document.querySelector('[data-name="loading"]');
+        var loading = ${LOADING_PROBE_JS};
         return {
           symbol: symbol,
           resolution: resolution,
-          isLoading: !!(spinner && spinner.offsetParent !== null),
+          isLoading: loading,
           canvasWidth: rect ? Math.round(rect.width) : 0,
           canvasHeight: rect ? Math.round(rect.height) : 0
         };
