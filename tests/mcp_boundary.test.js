@@ -27,26 +27,35 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { registerDataTools } from '../src/tools/data.js';
+import { registerChartTools } from '../src/tools/chart.js';
 
 /**
- * The schema object the server actually registers — captured from the real
+ * The schema the server actually registers — captured from the real
  * registration call, never re-declared here. A copy would drift and pass while
- * production broke.
+ * production broke. Registration-form-agnostic: a legacy `tool()` raw shape is
+ * wrapped in `z.object()` (the strip-unknowns semantics the SDK applies to raw
+ * shapes); a `registerTool()` object schema is used AS-IS — the SDK validates
+ * call arguments against that same object through its zod-compat layer, so
+ * there is no separate "SDK parse" to imitate and nothing to drift from.
  */
-function registeredShape(toolName = 'data_get_ohlcv') {
-  let shape;
-  registerDataTools({ tool: (name, _desc, paramsSchema) => { if (name === toolName) shape = paramsSchema; } });
-  assert.ok(shape, `${toolName} was not registered`);
-  return shape;
+function capturedSchema(register, toolName) {
+  let schema;
+  register({
+    tool: (name, _desc, paramsSchema) => { if (name === toolName) schema = z.object(paramsSchema); },
+    registerTool: (name, config) => { if (name === toolName) schema = config.inputSchema; },
+  });
+  assert.ok(schema, `${toolName} was not registered`);
+  return schema;
 }
 
-/** Parse exactly as the SDK does: it normalizes the raw shape to an object schema. */
-const parseArgs = (args) => z.object(registeredShape()).safeParse(args);
+const parseArgs = (args) => capturedSchema(registerDataTools, 'data_get_ohlcv').safeParse(args);
+const parseRangeArgs = (args) => capturedSchema(registerChartTools, 'chart_set_visible_range').safeParse(args);
 
 let client, server;
 before(async () => {
   server = new McpServer({ name: 'boundary-test', version: '0.0.0' });
   registerDataTools(server);
+  registerChartTools(server);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   client = new Client({ name: 'boundary-test-client', version: '0.0.0' });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -64,8 +73,79 @@ const rejected = (res) => res?.isError === true
   && /-32602|Input validation error/.test(res?.content?.[0]?.text ?? '');
 
 const call = (args) => client.callTool({ name: 'data_get_ohlcv', arguments: args });
+const callRange = (args) => client.callTool({ name: 'chart_set_visible_range', arguments: args });
 
 const T = 1_700_000_000;
+const T2 = 1_700_000_600;
+
+describe('MCP boundary — unknown temporal keys must not silently become latest mode (IH1)', () => {
+  // data_get_ohlcv has TWO legal modes ({} → latest; {from,to} → window), so
+  // stripping unknown keys is not a harmless normalization: it rewrites an
+  // expressed historical request into a latest-mode request. These four were
+  // measured on the pre-fix boundary arriving at the handler as {summary:true}
+  // (or with the unknown key silently dropped) and RUNNING.
+  it('{FROM,TO} is REFUSED before the handler, not silently read as latest', async () => {
+    assert.ok(rejected(await call({ FROM: T, TO: T2 })),
+      'uppercase temporal keys must be a validation refusal, not latest mode');
+  });
+
+  it('{From,To} is REFUSED before the handler', async () => {
+    assert.ok(rejected(await call({ From: T, To: T2 })));
+  });
+
+  it('{banana:123} is REFUSED — unknown keys are caller errors on this tool', async () => {
+    assert.ok(rejected(await call({ banana: 123 })));
+  });
+
+  it('{from,to,banana} is REFUSED — a legal window plus an unknown key is still a caller error', async () => {
+    assert.ok(rejected(await call({ from: T, to: T2, banana: 123 })),
+    'strictness must not only catch the all-keys-misspelled shape');
+  });
+});
+
+describe('MCP boundary — chart_set_visible_range: malformed primitives must not become timestamps (IH2, live twin)', () => {
+  // Measured on the pre-fix boundary: z.coerce.number() laundered null/''/true
+  // into 0/0/1, which then drove the history-paging loop toward the invented
+  // bound on a live chart. A schema refusal is the FAST pre-handler path, so
+  // these also prove malformed input can never reach paging.
+  it('from:null is REFUSED, not read as epoch 0', async () => {
+    assert.ok(rejected(await callRange({ from: null, to: T })));
+  });
+
+  it('from:"" is REFUSED, not read as epoch 0', async () => {
+    assert.ok(rejected(await callRange({ from: '', to: T })));
+  });
+
+  it('from:true is REFUSED, not read as 1', async () => {
+    assert.ok(rejected(await callRange({ from: true, to: T })));
+  });
+
+  it('from:false is REFUSED, not read as epoch 0', async () => {
+    assert.ok(rejected(await callRange({ from: false, to: T })));
+  });
+
+  it('a fractional second is REFUSED — the representation is an integer', async () => {
+    assert.ok(rejected(await callRange({ from: 1.5, to: T })));
+  });
+
+  it('a non-numeric string stays REFUSED (control — already failed pre-fix)', async () => {
+    assert.ok(rejected(await callRange({ from: 'yesterday', to: T })));
+  });
+
+  it('every legal representation still passes at the schema: integers, integer strings, epoch 0', () => {
+    for (const args of [{ from: T, to: T2 }, { from: String(T), to: String(T2) }, { from: 0, to: T }]) {
+      const r = parseRangeArgs(args);
+      assert.equal(r.success, true, r.error && JSON.stringify(r.error.issues));
+    }
+    assert.equal(parseRangeArgs({ from: 0, to: T }).data.from, 0, 'epoch 0 stays a real timestamp');
+    assert.equal(parseRangeArgs({ from: String(T), to: String(T2) }).data.from, T, 'integer strings still convert');
+  });
+
+  it('both bounds stay REQUIRED — the unknown-key shape keeps failing closed', async () => {
+    assert.ok(rejected(await callRange({ FROM: T, TO: T2 })),
+      'stripped/missing required fields must remain a refusal');
+  });
+});
 
 describe('MCP boundary — a malformed window representation is refused, never coerced', () => {
   it('from:null with a real to is REFUSED, not read as epoch 0', async () => {
@@ -155,6 +235,9 @@ describe('MCP boundary — the served surface is unchanged', () => {
     // schema type were ever emitted as untyped, a client could infer null is fine.
     assert.equal(tool.inputSchema.properties.from.type, 'integer');
     assert.equal(tool.inputSchema.properties.to.type, 'integer');
+    // IH1: the unknown-key policy is part of the served contract now.
+    assert.equal(tool.inputSchema.additionalProperties, false,
+      'data_get_ohlcv must advertise additionalProperties:false');
   });
 
   it('a legal call still reaches the handler through the REAL dispatch path', async (t) => {

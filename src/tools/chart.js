@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { jsonResult } from './_format.js';
+import { unixSeconds } from './_temporal.js';
 import * as core from '../core/chart.js';
 
 // Curated resolutions for trade review. Deliberately an enum, not a free
@@ -27,8 +28,11 @@ export function registerChartTools(server) {
   });
 
   server.tool('chart_set_visible_range', 'Zoom the chart to a specific date range (unix timestamps in seconds). Pages in older history as needed, so this also serves as jump-to-date for reviewing a past trade: pass a window around the trade time.', {
-    from: z.coerce.number().describe('Start of range (unix seconds)'),
-    to: z.coerce.number().describe('End of range (unix seconds, must be greater than from)'),
+    // unixSeconds, not z.coerce.number(): coercion laundered null/''/true into
+    // epoch 0/0/1 here, and the invented bound then drove the history-paging
+    // loop (issue #3, measured). Both fields stay REQUIRED.
+    from: unixSeconds.describe('Start of range (unix seconds)'),
+    to: unixSeconds.describe('End of range (unix seconds, must be greater than from)'),
   }, async ({ from, to }) => {
     try { return jsonResult(await core.setVisibleRange({ from, to })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
