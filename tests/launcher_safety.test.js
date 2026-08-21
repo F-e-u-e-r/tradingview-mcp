@@ -74,6 +74,10 @@ test('launcher: pre-signal identity recheck present in the teardown path', () =>
   assert.match(teardownBody, /ps -p "\$main_pid" -o comm=/, 'identity re-validated at the instant of signalling');
 });
 
+test('launcher: canonicalization failure is checked loudly by resolve_app', () => {
+  assert.match(codeText, /if ! canonicalize_app/, 'a failed canonicalization must not silently fall back to the lexical spelling');
+});
+
 // ---------- behavioral tests (darwin only) ----------
 
 const FIXTURE_SLEEP = '/bin/sleep';
@@ -238,23 +242,82 @@ test('foreign install: detected and reported, observation-only — flow proceeds
   }
 });
 
+// Shadow the kill BUILTIN with a logging function so the tests can assert on
+// DELIVERED signals, not just the syntactic call site (cross-model round 2:
+// a loop around the single site would defeat a static count).
+function killLogBody(logPath, body) {
+  return [
+    `kill() { printf '%s\\n' "$*" >> ${JSON.stringify(logPath)}; command kill "$@"; }`,
+    body,
+  ].join('\n');
+}
+function readKillLog(logPath) {
+  return existsSync(logPath) ? readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean) : [];
+}
+
 test('teardown: one TERM to main drains the set; unrelated survivor untouched', { skip: !isDarwin }, async () => {
   const { root, app } = makeFakeBundle();
   const bait = join(root, 'TradingView-issue6.txt');
   writeFileSync(bait, '');
+  const killLog = join(root, 'kill.log');
   const main = spawn(app, ['600'], { stdio: 'ignore' });
   const tail = spawn('tail', ['-f', bait], { stdio: 'ignore' });
   try {
     await settle(400);
-    const r = await harness(app, 'teardown_existing');
+    const r = await harness(app, killLogBody(killLog, 'teardown_existing'));
     assert.equal(r.code, 0, `teardown succeeds: ${r.stdout}`);
     assert.match(r.stdout, /Sending one SIGTERM to the main process only/);
     assert.match(r.stdout, /Teardown complete/);
+    const kills = readKillLog(killLog);
+    assert.equal(kills.length, 1, `exactly ONE kill invocation at runtime, got: ${JSON.stringify(kills)}`);
+    assert.equal(kills[0], `-TERM ${main.pid}`, 'the one runtime kill is TERM to the main pid, single operand');
     await settle(200);
     assert.equal(alive(main.pid), false, 'main terminated');
     assert.equal(alive(tail.pid), true, 'unrelated process with matching argv is untouched');
   } finally {
     reap(main.pid); reap(tail.pid); rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('fail closed: ps failing at the pre-signal recheck is an observation error, not a gone pid', { skip: !isDarwin }, async () => {
+  const { root, app } = makeFakeBundle();
+  const main = spawn(app, ['600'], { stdio: 'ignore' });
+  try {
+    await settle(400);
+    // ps works for the foreign/bundle/main observations (calls 1-3), then
+    // fails from the recheck onward — the launcher must fail closed and must
+    // NOT claim the main exited. The call count lives in a FILE because every
+    // observation runs inside $(...) — a shell-variable counter would reset
+    // in each subshell and the sabotage would never trigger.
+    const cnt = join(root, 'ps-calls');
+    const body = [
+      `CNT=${JSON.stringify(cnt)}; : > "$CNT"`,
+      'ps() { echo x >> "$CNT"; if [ "$(wc -l < "$CNT")" -le 3 ]; then command ps "$@"; else return 1; fi; }',
+      'teardown_existing',
+    ].join('\n');
+    const r = await harness(app, body);
+    assert.notEqual(r.code, 0, 'teardown refuses');
+    assert.doesNotMatch(r.stdout, /exited before signalling/, 'a broken observation must not be reported as an exited main');
+    assert.match(r.stdout, /process table/i, 'reported as an observation failure');
+    assert.equal(alive(main.pid), true, 'nothing signalled');
+  } finally {
+    reap(main.pid); rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('fail closed: canonicalize_app fails loudly when the path cannot be resolved', { skip: !isDarwin }, async () => {
+  const parent = mkdtempSync(join(tmpdir(), 'tv-launcher-test-'));
+  const locked = join(parent, 'locked');
+  mkdirSync(join(locked, 'MacOS'), { recursive: true });
+  const fakeApp = join(locked, 'MacOS', 'TradingView');
+  writeFileSync(fakeApp, '');
+  chmodSync(locked, 0o000); // owner loses traversal -> cd inside must fail
+  try {
+    const r = await harness(fakeApp, 'canonicalize_app; echo "canon_rc=$?"');
+    assert.match(r.stdout, /canon_rc=1/, 'canonicalization failure is reported, not silently ignored');
+  } finally {
+    chmodSync(locked, 0o755);
+    rmSync(parent, { recursive: true, force: true });
   }
 });
 
@@ -295,14 +358,18 @@ test('fail closed: bundle-owned helper with no identifiable main is never signal
 
 test('fail closed: TERM-resistant main -> drain timeout, no escalation, no relaunch path', { skip: !isDarwin }, async () => {
   const { root, app } = makeFakeBundle();
+  const killLog = join(root, 'kill.log');
   // exec keeps ignored signal dispositions: the resulting process has the fake
   // main's executable path AND ignores SIGTERM, forcing the drain to time out.
   const main = spawn('/bin/bash', ['-c', `trap '' TERM; exec ${JSON.stringify(app)} 600`], { stdio: 'ignore' });
   try {
     await settle(600);
-    const r = await harness(app, 'teardown_existing');
+    const r = await harness(app, killLogBody(killLog, 'teardown_existing'));
     assert.notEqual(r.code, 0, 'teardown fails closed on timeout');
     assert.match(r.stdout, /FAILING CLOSED/);
+    const kills = readKillLog(killLog);
+    assert.equal(kills.length, 1, `even across all drain polls, exactly ONE runtime kill, got: ${JSON.stringify(kills)}`);
+    assert.equal(kills[0], `-TERM ${main.pid}`);
     assert.equal(alive(main.pid), true, 'no SIGKILL escalation — process still alive after timeout');
   } finally {
     reap(main.pid); rmSync(root, { recursive: true, force: true });

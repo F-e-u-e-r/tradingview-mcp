@@ -61,8 +61,10 @@ DRAIN_POLL_INTERVAL=0.2
 # foreign-main guard or a visible non-durable relaunch, never a mis-signal.)
 canonicalize_app() {
   local dir
-  dir=$(cd "$(dirname "$APP")" 2>/dev/null && pwd -P) || return 0
-  [ -n "$dir" ] && APP="$dir/$(basename "$APP")"
+  dir=$(cd "$(dirname "$APP")" 2>/dev/null && pwd -P) || return 1
+  [ -n "$dir" ] || return 1
+  APP="$dir/$(basename "$APP")"
+  [ -f "$APP" ] || return 1
 }
 
 resolve_app() {
@@ -107,7 +109,14 @@ resolve_app() {
     return 1
   fi
 
-  canonicalize_app
+  # A failed canonicalization must be LOUD, not a silent fallback to the
+  # lexical spelling: an unverified spelling can make a live instance
+  # invisible and relaunch alongside it (cross-model round 2, convergent).
+  if ! canonicalize_app; then
+    echo "Error: could not canonicalize the resolved app path: $APP"
+    echo "Refusing to proceed on an unverified spelling (fail closed)."
+    return 1
+  fi
   BUNDLE="${APP%"$MAIN_REL_PATH"}"
   if [ "$BUNDLE" = "$APP" ]; then
     echo "Error: resolved executable does not sit at <bundle>$MAIN_REL_PATH: $APP"
@@ -235,20 +244,27 @@ teardown_existing() {
   main_pid="$main_pids"
   # Identity recheck at the instant of signalling. A PID that is simply GONE
   # is fine — teardown may already be underway and the drain check below
-  # adjudicates; a PID whose executable CHANGED is refused.
+  # adjudicates; a PID whose executable CHANGED is refused. A nonzero ps
+  # status alone is AMBIGUOUS (gone pid vs broken observation): a control
+  # probe distinguishes — a working ps that cannot see the PID means gone;
+  # a ps that cannot list anything is an observation failure and must fail
+  # closed, never read as an exited main (cross-model round 2, convergent).
   comm_now=$(ps -p "$main_pid" -o comm= 2>/dev/null); psrc=$?
-  if [ "$psrc" -eq 0 ] && [ "$comm_now" != "$APP" ]; then
+  if [ "$psrc" -ne 0 ]; then
+    if ! ps -axo pid= > /dev/null 2>&1; then
+      observation_error
+      return 1
+    fi
+    echo "Main PID $main_pid exited before signalling; waiting for the bundle set to drain."
+  elif [ "$comm_now" != "$APP" ]; then
     echo "Error: PID $main_pid no longer runs the resolved executable (now: $comm_now)."
     echo "Refusing to signal (fail closed)."
     return 1
-  fi
-  if [ "$psrc" -eq 0 ]; then
+  else
     echo "Existing TradingView instance found (main PID $main_pid)."
     echo "Sending one SIGTERM to the main process only..."
     kill -TERM "$main_pid" 2>/dev/null \
       || echo "(SIGTERM not delivered — the process may have just exited; relying on the drain check)"
-  else
-    echo "Main PID $main_pid exited before signalling; waiting for the bundle set to drain."
   fi
 
   i=0
