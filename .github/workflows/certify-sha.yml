@@ -1,0 +1,108 @@
+name: certify-sha
+
+# CI2 — exact/frozen-SHA certification (issue #4).
+#
+# This workflow is the repo's evidence-producing instrument: an operator
+# names ONE immutable commit SHA, and each Node leg independently proves it
+# ran the full official gates on exactly that commit. It is NOT PR gating:
+# pull-request CI (ci.yml) correctly tests GitHub's prepared merge result
+# (refs/pull/N/merge); this workflow certifies one frozen commit on explicit
+# operator demand. Neither replaces the other.
+#
+# CERTIFICATION CLAIM CONTRACT. A SHA is certified only by a run in which
+# BOTH legs emitted the terminal `CERTIFY-OK` marker from the final step of
+# a SUCCESSFUL job. The marker is read from that step's own log section —
+# never grepped from the whole log, because gate output (tests of a hostile
+# or broken target) could print look-alike lines; a forged line cannot,
+# however, turn failed gates into a successful terminal step. No marker —
+# timeout, crash, cancellation, red leg — means NOT certified. One red leg
+# means certification FAILED.
+#
+# PROVENANCE. The certifier revision (github.workflow_sha — the commit this
+# workflow definition was loaded from, normally the default-branch head) is
+# recorded separately from the certified target: workflow revision X
+# certifies source tree Y; the two are never the same claim. The run's own
+# headBranch/headSha metadata identifies the WORKFLOW SOURCE, never the
+# target — the target lives in the dispatch inputs and these markers.
+#
+# Measured constraints this design rests on (issue #4 orientation, hosted
+# run 32487134086): workflow_dispatch requires the definition to exist on
+# the default branch; raw-SHA checkout succeeds for non-tip ancestors and
+# never-merged PR heads with no extra fetch depth; a nonexistent SHA fails
+# closed at checkout; abbreviated SHAs and refs are rejected before checkout
+# by the validation gate below (a ref is mutable, an abbreviation is
+# ambiguous — neither is a certifiable identity).
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_sha:
+        description: 'FULL 40-character lowercase commit SHA to certify'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  certify:
+    runs-on: ubuntu-latest
+    strategy:
+      # Both runtimes must report independently: a green 20.x must not be
+      # able to hide a red 22.x by cancelling it.
+      fail-fast: false
+      matrix:
+        node-version: [20.x, 22.x]
+    env:
+      # Operator input enters ONLY through env — never interpolated into
+      # command syntax — and is used as a SHA only after the whole-string
+      # regex gate below ([[ =~ ]] anchors the FULL string, so embedded
+      # newlines or trailing garbage cannot ride behind a valid-looking
+      # line the way a per-line grep could be fooled).
+      TARGET_SHA: ${{ inputs.target_sha }}
+    steps:
+      - name: Provenance — certifier revision vs requested target
+        run: |
+          echo "workflow_ref = ${{ github.workflow_ref }}"
+          echo "certifier    = ${{ github.workflow_sha }}"
+          echo "run_id       = ${{ github.run_id }}"
+          printf 'requested    = %s\n' "${TARGET_SHA}"
+
+      - name: Fail closed unless the input is one full 40-char lowercase hex SHA
+        run: |
+          if [[ ! "${TARGET_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            printf 'REJECTED: target_sha must be a single full 40-character lowercase hex commit SHA; got: %s\n' "${TARGET_SHA}"
+            exit 1
+          fi
+          echo "input form OK"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_sha }}
+          persist-credentials: false
+
+      - name: Assert the checked-out tree IS the requested commit (before install)
+        run: |
+          echo "HEAD     = $(git rev-parse HEAD)"
+          echo "expected = ${TARGET_SHA}"
+          test "$(git rev-parse HEAD)" = "${TARGET_SHA}"
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install dependencies (no lifecycle scripts)
+        run: npm ci --ignore-scripts
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Tests
+        run: npm test
+
+      - name: Terminal certification marker — re-assert HEAD after gates
+        run: |
+          test "$(git rev-parse HEAD)" = "${TARGET_SHA}"
+          echo "CERTIFY-OK node=${{ matrix.node-version }} target=${TARGET_SHA} head=$(git rev-parse HEAD) certifier=${{ github.workflow_sha }} run=${{ github.run_id }}"
