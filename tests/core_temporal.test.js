@@ -74,6 +74,30 @@ describe('core temporal honesty — supplied malformed values are representation
     await assert.rejects(run({ from: 'banana', to: T }), REPRESENTATION);
     await assert.rejects(run({ from: 1.5, to: T }), REPRESENTATION);
   });
+
+  // Cross-model review round on d06efd1: a digit string long enough to
+  // overflow Number() passed the regex and became Infinity — the baseline's
+  // finite check refused the same call. Core now mirrors the served
+  // boundary's measured zod-v4 semantics (finite SAFE integers), which also
+  // stops >2^53 strings from being silently altered to a different timestamp
+  // and huge float-integers like 1e300 from posing as temporal values.
+  it("a digit string that overflows Number() must not become Infinity", async () => {
+    await assert.rejects(run({ from: '0', to: '9'.repeat(400) }), REPRESENTATION);
+  });
+
+  it('a digit string beyond 2^53 must be refused, not silently altered', async () => {
+    await assert.rejects(run({ from: 0, to: '9007199254740993' }), REPRESENTATION);
+  });
+
+  it('a huge integral float like 1e300 is not a timestamp representation', async () => {
+    await assert.rejects(run({ from: 0, to: 1e300 }), REPRESENTATION);
+  });
+
+  it('the largest safe integer itself stays legal', async () => {
+    const r = await run({ from: 0, to: Number.MAX_SAFE_INTEGER });
+    assert.equal(r.mode, 'window');
+    assert.equal(r.requested_window.to, Number.MAX_SAFE_INTEGER);
+  });
 });
 
 describe('core temporal honesty — presence semantics and legal forms are preserved', () => {

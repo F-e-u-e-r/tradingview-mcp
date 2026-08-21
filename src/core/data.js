@@ -46,10 +46,18 @@ export async function getOhlcv({ count, summary = true, from, to, _deps } = {}) 
   // stays a real timestamp. Deliberately NOT connection.js's requireFinite:
   // that helper answers finiteness of a number it is handed, not whether the
   // caller's representation was temporal to begin with.
+  // SAFE integers only, mirroring the served boundary's measured zod-v4
+  // semantics: a digit string long enough to overflow Number() otherwise
+  // becomes Infinity (the pre-hardening finite check refused it — cross-model
+  // review round), a >2^53 string is silently altered to a neighboring
+  // timestamp, and 1e300 is an "integer" to Number.isInteger.
   const parseUnixSeconds = (v, name) => {
-    if (typeof v === 'number' && Number.isInteger(v)) return v;
-    if (typeof v === 'string' && /^-?\d+$/.test(v)) return Number(v);
-    throw new Error(`${name} must be an integer unix-seconds timestamp (or an integer string), got: ${JSON.stringify(v)}`);
+    if (typeof v === 'number' && Number.isSafeInteger(v)) return v;
+    if (typeof v === 'string' && /^-?\d+$/.test(v)) {
+      const n = Number(v);
+      if (Number.isSafeInteger(n)) return n;
+    }
+    throw new Error(`${name} must be a safe-integer unix-seconds timestamp (or such an integer string), got: ${JSON.stringify(v)}`);
   };
 
   // A half-window is a caller error, not something to infer.
