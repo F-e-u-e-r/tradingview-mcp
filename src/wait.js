@@ -26,10 +26,21 @@ export const LOADING_PROBE_JS = `
         });
       }
       if (el.getClientRects().length === 0) return false;
+      // visibility is resolved AT the element: the computed value already
+      // carries both inheritance and descendant override, so a
+      // visibility:visible child inside a visibility:hidden ancestor is
+      // painted and must count. Scanning ancestors for visibility would
+      // wrongly hide exactly that case (cross-model review finding).
+      var vis = getComputedStyle(el).visibility;
+      if (vis === 'hidden' || vis === 'collapse') return false;
+      // opacity composites (an ancestor's 0 hides descendants regardless of
+      // their own value) and a content-visibility:hidden ancestor skips the
+      // subtree while children still report client rects (measured), so BOTH
+      // must be ancestor-scanned; display:none anywhere already implies no
+      // rects, the explicit check is belt-and-braces.
       for (var n = el; n; n = n.parentElement) {
         var cs = getComputedStyle(n);
-        if (cs.display === 'none' || cs.visibility === 'hidden'
-          || cs.visibility === 'collapse' || parseFloat(cs.opacity) === 0
+        if (cs.display === 'none' || parseFloat(cs.opacity) === 0
           || cs.contentVisibility === 'hidden') return false;
       }
       return true;

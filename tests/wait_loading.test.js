@@ -16,22 +16,38 @@ const BODY_SENTINEL = {};
 // fixed:true models a visible position:fixed overlay: it HAS a box and is
 // observably visible, but offsetParent is null — the measured real-browser
 // divergence that motivated replacing the offsetParent proxy.
-function el({ classes = '', dataName = null, visible = true, fixed = false, cv = true }) {
+// visibility is the COMPUTED value (inheritance and descendant override
+// already resolved, as getComputedStyle reports it); parent builds the
+// ancestor chain the fallback walk sees; cvVisible is what the native
+// checkVisibility() returns for the node (real-browser measured per shape).
+function el({
+  classes = '', dataName = null, visible = true, fixed = false, cv = true,
+  visibility = 'visible', parent = null, cvVisible = undefined,
+}) {
+  const nativeVisible = cvVisible !== undefined ? cvVisible : (visible && visibility === 'visible');
   const node = {
     className: classes,
     dataset: dataName ? { name: dataName } : {},
-    parentElement: null,
+    parentElement: parent,
     offsetParent: visible && !fixed ? BODY_SENTINEL : null,
     getClientRects: () => (visible ? [{ width: 20, height: 20 }] : []),
     style: {
       display: visible ? 'block' : 'none',
-      visibility: 'visible',
+      visibility,
       opacity: '1',
       position: fixed ? 'fixed' : 'static',
     },
   };
-  if (cv) node.checkVisibility = () => visible;
+  if (cv) node.checkVisibility = () => nativeVisible;
   return node;
+}
+
+// Ancestor stubs for the fallback's computed-style walk.
+function ancestor(styleOverrides) {
+  return {
+    parentElement: null,
+    style: { display: 'block', visibility: 'visible', opacity: '1', position: 'static', ...styleOverrides },
+  };
 }
 
 function makeDoc(bySelector) {
@@ -127,6 +143,43 @@ function makeShapes(cv = true) {
         '[data-name="loading"]': [],
       }),
     },
+    // s7–s9 carry real-browser measured values (repro harness, issue #2
+    // cross-model round): computed visibility resolves inheritance AND
+    // descendant override, and children under a content-visibility:hidden
+    // ancestor still report client rects.
+    's7 ancestor visibility:hidden + child visibility:visible override (painted)': {
+      expected: 'busy',
+      doc: makeDoc({
+        '[class*="loader"]': [E({
+          classes: 'loader-x', visibility: 'visible',
+          parent: ancestor({ visibility: 'hidden' }), cvVisible: true,
+        })],
+        '[class*="loading"]': [],
+        '[data-name="loading"]': [],
+      }),
+    },
+    's8 ancestor visibility:hidden + child inheriting hidden (not painted)': {
+      expected: 'ready',
+      doc: makeDoc({
+        '[class*="loader"]': [E({
+          classes: 'loader-x', visibility: 'hidden',
+          parent: ancestor({ visibility: 'hidden' }), cvVisible: false,
+        })],
+        '[class*="loading"]': [],
+        '[data-name="loading"]': [],
+      }),
+    },
+    's9 ancestor content-visibility:hidden + visible-styled child (skipped, has rects)': {
+      expected: 'ready',
+      doc: makeDoc({
+        '[class*="loader"]': [E({
+          classes: 'loader-x',
+          parent: ancestor({ contentVisibility: 'hidden' }), cvVisible: false,
+        })],
+        '[class*="loading"]': [],
+        '[data-name="loading"]': [],
+      }),
+    },
   };
 }
 
@@ -187,6 +240,27 @@ for (const cv of [true, false]) {
     });
   }
 }
+
+// End-to-end fallback-branch coverage of the s7 override shape (the reviewer
+// counterexample): with no native checkVisibility, both waits must stay busy
+// for a painted spinner whose ancestor is visibility:hidden.
+test('waitForChartReady — s7 override shape on the fallback branch → busy', async () => {
+  const { doc } = makeShapes(false)['s7 ancestor visibility:hidden + child visibility:visible override (painted)'];
+  const states = [];
+  const ready = await waitForChartReady(null, null, BUSY_TIMEOUT, fakeEvaluateFor(doc, states));
+  assert.equal(states.at(-1).loading, true,
+    'fallback must judge a painted override child as loading');
+  assert.equal(ready, false);
+});
+
+test('waitForChartRender — s7 override shape on the fallback branch → busy', async () => {
+  const { doc } = makeShapes(false)['s7 ancestor visibility:hidden + child visibility:visible override (painted)'];
+  const states = [];
+  const done = await waitForChartRender(BUSY_TIMEOUT, fakeEvaluateFor(doc, states));
+  assert.equal(states.at(-1).isLoading, true,
+    'fallback must judge a painted override child as loading');
+  assert.equal(done, false);
+});
 
 // Drift guard: both wait functions must carry the SAME loading primitive.
 // Captures the exact expression each function hands to evaluate() and asserts
