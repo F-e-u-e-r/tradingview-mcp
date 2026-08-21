@@ -218,15 +218,18 @@ test('fail closed: unreadable process table is never "nothing running"', { skip:
   }
 });
 
-test('fail closed: a main from a DIFFERENT install aborts, signalling nothing', { skip: !isDarwin }, async () => {
+test('foreign install: detected and reported, observation-only — flow proceeds, nothing signalled', { skip: !isDarwin }, async () => {
+  // Owner ruling 2026-08-22: the adjudicated criteria are the ONLY normative
+  // accept/reject conditions; a foreign install is diagnostic, never a
+  // rejection condition and never a reason to signal.
   const a = makeFakeBundle(); // resolved install (nothing running from it)
   const b = makeFakeBundle(); // foreign install with a live main
   const foreign = spawn(b.app, ['600'], { stdio: 'ignore' });
   try {
     await settle(400);
     const r = await harness(a.app, 'teardown_existing');
-    assert.notEqual(r.code, 0, 'teardown refuses');
-    assert.match(r.stdout, /different location/);
+    assert.equal(r.code, 0, 'foreign install never adjudicates the teardown');
+    assert.match(r.stdout, /foreign_install_detected/);
     assert.equal(alive(foreign.pid), true, 'foreign main untouched');
   } finally {
     reap(foreign.pid);

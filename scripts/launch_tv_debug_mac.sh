@@ -28,9 +28,13 @@
 #   * Bundle-owned processes present with no identifiable main process:
 #     abort rather than touch helpers (fail closed).
 #   * A TradingView main running from a DIFFERENT install than the resolved
-#     one also aborts, signalling nothing: the profile singleton is shared
-#     across installs, so relaunching alongside it can never yield a durable
-#     CDP endpoint — and that foreign instance is not ours to terminate.
+#     one is DETECTED and reported (foreign_install_detected) but is
+#     OBSERVATION-ONLY (owner ruling 2026-08-22): the adjudicated teardown
+#     criteria above stay the only normative accept/reject conditions. The
+#     shared profile singleton means a relaunch alongside that instance may
+#     not yield a durable CDP endpoint — reported, never adjudicated, and
+#     never a reason to signal anything. If dual-install is ever shown to
+#     break correctness, that becomes a spec change, not a guard.
 #   * Why teardown exists at all (direction 2): with an instance alive, a
 #     direct relaunch with --remote-debugging-port prints "DevTools
 #     listening", exits 0, and leaves NO durable CDP endpoint — the port dies
@@ -195,15 +199,15 @@ list_bundle_processes() {
 teardown_existing() {
   local foreign bundle_pids main_pids main_count main_pid comm_now psrc i
 
-  foreign=$(tv_foreign_mains) || { observation_error; return 1; }
+  # Observation only — never adjudication (owner ruling 2026-08-22): a foreign
+  # install is diagnostic, not a rejection condition. An unreadable table here
+  # is tolerated silently; the normative observations below fail closed on it.
+  foreign=$(tv_foreign_mains) || foreign=""
   if [ -n "$foreign" ]; then
-    echo "Error: a TradingView main process is running from a different location than the resolved app:"
+    echo "Warning: foreign_install_detected — a TradingView main process is running from a different location than the resolved app:"
     printf '%s\n' "$foreign"
-    echo "This launcher manages only: $APP"
-    echo "The profile singleton is shared, so relaunching alongside that instance cannot"
-    echo "yield a durable CDP endpoint — and it is not this script's to terminate."
-    echo "Quit it manually, then re-run (fail closed; nothing was signalled)."
-    return 1
+    echo "(observation only; teardown/relaunch proceed on the resolved app: $APP."
+    echo " A relaunch alongside that instance may not yield a durable CDP endpoint — the profile singleton is shared.)"
   fi
 
   bundle_pids=$(tv_bundle_pids) || { observation_error; return 1; }
