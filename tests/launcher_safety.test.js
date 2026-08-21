@@ -305,6 +305,33 @@ test('fail closed: ps failing at the pre-signal recheck is an observation error,
   }
 });
 
+test('fail closed: resolve_app REFUSES when canonicalization fails (real caller)', { skip: !isDarwin }, async () => {
+  // Drives the real resolve_app with canonicalize_app forced to fail: the
+  // caller must abort, not continue on the lexical spelling. A fixture HOME
+  // provides a resolvable app on machines without a real install; on machines
+  // with one, /Applications wins — either way resolve_app reaches the
+  // canonicalization step.
+  const home = mkdtempSync(join(tmpdir(), 'tv-launcher-test-home-'));
+  const appDir = join(home, 'Applications', 'TradingView.app', 'Contents', 'MacOS');
+  mkdirSync(appDir, { recursive: true });
+  writeFileSync(join(appDir, 'TradingView'), '');
+  try {
+    const body = [
+      // restore the real suffix: this test drives resolve_app itself and scans
+      // no processes, so the harness's hermeticity override must not apply
+      'MAIN_REL_PATH="/Contents/MacOS/TradingView"',
+      `HOME=${JSON.stringify(home)}`,
+      'canonicalize_app() { return 1; }',
+      'resolve_app; echo "resolve_rc=$?"',
+    ].join('\n');
+    const r = await harness('/nonexistent/Contents/MacOS/TradingView', body);
+    assert.match(r.stdout, /could not canonicalize/, 'the canonicalization-failure refusal is reached');
+    assert.match(r.stdout, /resolve_rc=1/, 'resolve_app refuses instead of continuing on the lexical spelling');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('fail closed: canonicalize_app fails loudly when the path cannot be resolved', { skip: !isDarwin }, async () => {
   const parent = mkdtempSync(join(tmpdir(), 'tv-launcher-test-'));
   const locked = join(parent, 'locked');

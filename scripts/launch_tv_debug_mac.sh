@@ -173,7 +173,10 @@ tv_bundle_pids() {
 # Returns non-zero if the process table cannot be read.
 tv_foreign_mains() {
   local table
-  table=$(ps -axo pid=,comm=) || return 1
+  # stderr silenced: this scan is observation-only and its failure is
+  # deliberately tolerated silently (a ps diagnostic would leak otherwise);
+  # the normative observation sites keep their loud failure paths.
+  table=$(ps -axo pid=,comm= 2>/dev/null) || return 1
   printf '%s\n' "$table" | TV_LAUNCH_APP="$APP" TV_LAUNCH_SUFFIX="$MAIN_REL_PATH" awk '
     BEGIN {
       app = ENVIRON["TV_LAUNCH_APP"]
