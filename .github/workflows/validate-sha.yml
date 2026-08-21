@@ -1,0 +1,67 @@
+name: SHA-bound validation (CI-only harness)
+
+# THIS IS NOT PRODUCT CI AND IS NEVER MERGED.
+#
+# Why it exists. `ci.yml` uses a bare `actions/checkout@v4`. On a `pull_request`
+# event GitHub sets GITHUB_REF to `refs/pull/N/merge` and GITHUB_SHA to a
+# synthetic merge commit, and a bare checkout takes that merge ref — NOT the PR
+# head. When the base is an ancestor of the head the merge TREE is identical to
+# the head tree, so such a run is honest *tree-equivalent* evidence — but it is
+# not commit-SHA-bound evidence, and the head SHA shown on the run page is PR
+# metadata, not proof of what the job checked out.
+#
+# This harness closes that gap: it pins the checkout to one exact commit and
+# PROVES it in-job, before installing or testing anything. The PR that carries
+# this file exists solely to trigger it; `main` stays on the frozen commit and
+# the frozen commit is never amended.
+
+on:
+  pull_request:
+    branches: [main]
+
+env:
+  TARGET_SHA: 4b7a49f64bd785ae8984c643669bdf794598e955
+
+jobs:
+  validate-frozen-sha:
+    runs-on: ubuntu-latest
+    strategy:
+      # Both runtimes must report independently: a green 20.x must not be able
+      # to hide a red 22.x by cancelling it.
+      fail-fast: false
+      matrix:
+        node-version: [20.x, 22.x]
+    steps:
+      # Literal SHA, deliberately not an expression: this line is the binding.
+      - uses: actions/checkout@v4
+        with:
+          ref: 4b7a49f64bd785ae8984c643669bdf794598e955
+
+      - name: Assert the checked-out tree IS the frozen commit
+        run: |
+          echo "HEAD     = $(git rev-parse HEAD)"
+          echo "expected = ${TARGET_SHA}"
+          test "$(git rev-parse HEAD)" = "${TARGET_SHA}"
+          echo "OK: this job is executing exactly ${TARGET_SHA}"
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install dependencies (no lifecycle scripts)
+        run: npm ci --ignore-scripts
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Tests (tool-surface gate + sanitization + unit — all offline)
+        run: npm test
+
+      - name: Re-assert HEAD after the run
+        # Nothing above should move HEAD. If something did, the evidence above
+        # would not describe the tree that was actually tested.
+        run: |
+          test "$(git rev-parse HEAD)" = "${TARGET_SHA}"
+          echo "OK: still exactly ${TARGET_SHA} after lint + tests"
