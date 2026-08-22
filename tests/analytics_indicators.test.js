@@ -64,6 +64,16 @@ describe('independent contract vectors — derivations in comments, no donor inv
     // (1+2+3)/3=2, (2+3+4)/3=3, (3+4+5)/3=4
     assert.deepEqual(sma([1, 2, 3, 4, 5], 3), [null, null, 2, 3, 4]);
   });
+  it('SMA/EMA at p=len produce exactly one value; p=1 is the identity — round-2 boundary pins', () => {
+    // p=len: sma([2,4,8],3) → [(2+4+8)/3]=14/3 at the last index only; the EMA
+    // is its seed there (same value). A `<= period` sufficiency mutant would
+    // return all-null for both.
+    assertSeriesClose(sma([2, 4, 8], 3), [null, null, 14 / 3], 'sma p=len');
+    assertSeriesClose(ema([2, 4, 8], 3), [null, null, 14 / 3], 'ema p=len');
+    // p=1: k=2/2=1, so EMA(1)=closes; SMA(1)=closes.
+    assert.deepEqual(sma([3, 4], 1), [3, 4]);
+    assert.deepEqual(ema([3, 4], 1), [3, 4]);
+  });
   it('EMA: [2,4,6,8,10] p=3 → seed=SMA(2,4,6)=4; k=0.5; then 8*.5+4*.5=6; 10*.5+6*.5=8', () => {
     assert.deepEqual(ema([2, 4, 6, 8, 10], 3), [null, null, 4, 6, 8]);
   });
@@ -79,10 +89,18 @@ describe('independent contract vectors — derivations in comments, no donor inv
     assert.notEqual(e[3], s[3], 'the fixture must actually discriminate EMA from SMA');
   });
   it('RSI p=2 on [10,11,10,11]: window gains [1,0] losses [0,1] → RS=1 → 50; next diff +1 → avgG=.75 avgL=.25 → RS=3 → 75', () => {
-    const r = rsi([10, 11, 10, 11], 2);
-    assert.deepEqual(r.slice(0, 2), [null, null]);
-    assertClose(r[2], 50, 'rsi[2]');
-    assertClose(r[3], 75, 'rsi[3]');
+    // full-array comparison pins output LENGTH too (round-2: a recurrence
+    // bound of `<=` would append a trailing NaN that spot checks miss)
+    assertSeriesClose(rsi([10, 11, 10, 11], 2), [null, null, 50, 75], 'rsi mixed');
+  });
+  it('RSI exact-minimum history (len = period+1) yields exactly one value — round-2 boundary pin', () => {
+    // p=2 on [10,11,10]: gains [1,0] avg .5; losses [0,1] avg .5 → RS=1 → 50.
+    // A `<= period + 1` sufficiency mutant would return all-null here.
+    assertSeriesClose(rsi([10, 11, 10], 2), [null, null, 50], 'rsi boundary');
+  });
+  it('RSI p=1: per-step Wilder collapses to the last change — round-2 p=1 pin', () => {
+    // [5,6,5,5]: +1 → 100; −1 → avgG=0,avgL=1 → 0; 0 → avgG=0,avgL=0 → zero-loss branch → 100.
+    assertSeriesClose(rsi([5, 6, 5, 5], 1), [null, 100, 0, 100], 'rsi p=1');
   });
   it('RSI: strictly rising series → 100 everywhere after warm-up (zero-loss branch)', () => {
     const closes = Array.from({ length: 20 }, (_, i) => i + 1);
@@ -123,6 +141,32 @@ describe('independent contract vectors — derivations in comments, no donor inv
     assertClose(r[2], 5.5, 'atr[2]');
     assertClose(r[3], 3.25, 'atr[3]');
   });
+  it('Donchian at p=len, p=1, and full-channel warm-up — round-2 boundary pins', () => {
+    // p=len: one channel at the last index. A `n <= period` early-return
+    // mutant would return all-null.
+    const pl = donchian([1, 3, 2], [0, 1, -1], 3);
+    assert.deepEqual(pl.upper, [null, null, 3]);
+    assert.deepEqual(pl.lower, [null, null, -1]);
+    assert.deepEqual(pl.middle, [null, null, 1]);
+    const p2 = donchian([3, 1], [0, -1], 2);
+    assert.deepEqual(p2.upper, [null, 3]);
+    assert.deepEqual(p2.lower, [null, -1]);
+    assert.deepEqual(p2.middle, [null, 1]);
+    // p=1: the channel is the bar itself.
+    const p1 = donchian([5, 7], [4, 6], 1);
+    assert.deepEqual(p1.upper, [5, 7]);
+    assert.deepEqual(p1.lower, [4, 6]);
+    assert.deepEqual(p1.middle, [4.5, 6.5]);
+    // insufficient history / empty: ALL THREE channels, not just upper
+    const short = donchian([1, 2], [1, 2], 3);
+    assert.deepEqual(short.upper, [null, null]);
+    assert.deepEqual(short.lower, [null, null]);
+    assert.deepEqual(short.middle, [null, null]);
+    const empty = donchian([], [], 3);
+    assert.deepEqual(empty.upper, []);
+    assert.deepEqual(empty.lower, []);
+    assert.deepEqual(empty.middle, []);
+  });
   it('Donchian p=2 INCLUDES the current bar (adjudicated pin — do not "fix" into exclusion)', () => {
     // highs [1,2,3,4], lows [0,1,2,3]:
     // idx1: max(1,2)=2 / min(0,1)=0 ; idx2: max(2,3)=3 / min(1,2)=1 ; idx3: 4/2
@@ -143,7 +187,9 @@ describe('independent contract vectors — derivations in comments, no donor inv
 
 describe('edges — approved period delta, warm-up, empty, constant', () => {
   const closes = [1, 2, 3, 4, 5];
-  const badPeriods = [0, -1, 1.5, '14', NaN, null];
+  // Infinity added round-2: Math.floor(Infinity) === Infinity, so a
+  // floor-equality validator mutant would silently accept it (all-null output).
+  const badPeriods = [0, -1, 1.5, '14', NaN, null, Infinity];
   it('invalid periods fail closed on every function (approved ADAPT delta)', () => {
     for (const p of badPeriods) {
       assert.throws(() => sma(closes, p), /positive integer/, `sma(${p})`);
@@ -178,6 +224,11 @@ describe('edges — approved period delta, warm-up, empty, constant', () => {
   it('mismatched column lengths refuse loudly (donor raised IndexError; silent NaN would be a semantic change)', () => {
     assert.throws(() => atr([1, 2, 3], [1, 2], [1, 2, 3], 1), /equal lengths/);
     assert.throws(() => donchian([1, 2, 3], [1, 2], 2), /equal lengths/);
+    // round-2: the oracle must not be one-shaped — a SHORT closes column and a
+    // LONGER column must refuse too (a highs-vs-lows-only or `<`-based
+    // validator mutant would accept these).
+    assert.throws(() => atr([10, 12], [9, 11], [10], 1), /equal lengths/);
+    assert.throws(() => donchian([1, 2], [0, 1, 2], 2), /equal lengths/);
   });
 });
 
