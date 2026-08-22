@@ -60,7 +60,7 @@ const RESULT = (ledger, closedTradePnl, openPositionAccounting, equitySeries, pa
   initialCash: params.initialCash,
   finalCash,
   finalEquity: equitySeries.length ? equitySeries[equitySeries.length - 1] : params.initialCash,
-  assumptions: { ...params },
+  assumptions: { initialCash: params.initialCash, commissionRate: params.commissionRate, slippageRate: params.slippageRate },
 });
 
 // ── 1. the seven contract fixtures (BT2 §7, verbatim; exact equality) ───────
@@ -244,6 +244,35 @@ describe('owner RED list', () => {
     assert.equal(a.finalCash, 2);
   });
 
+  it('entry effective price follows the WRITTEN order raw × (1 + s) — additive expansion differs by one ULP (round-3)', () => {
+    // raw 0.1, s 0.2: written 0.1 × 1.2 = 0.12 exactly-as-rounded; the
+    // additive expansion 0.1 + 0.1 × 0.2 = 0.12000000000000001. Quantity and
+    // the marked equity diverge one ULP-step with them.
+    const rows = [[1, 1, 1, 1], [1, 2, 1, 1], [0.1, 1, 0.1, 0.1]];
+    const a = run(rows, 1, { initialCash: 1, commissionRate: 0, slippageRate: 0.2 });
+    assert.equal(a.ledger[0].effectivePrice, 0.12);
+    assert.equal(a.ledger[0].quantity, 8.333333333333334);
+    assert.equal(a.finalEquity, 0.8333333333333335);
+  });
+
+  it('positive exit cash below 1e-9 is preserved exactly (round-3 leading-dot threshold)', () => {
+    // cash 1e-10 → exit cash exactly 5e-11: any threshold at .000000001 or
+    // above (the leading-dot literal that evaded the round-2 whitelist
+    // regex) snaps this to zero.
+    const rows = [[1, 1, 1, 1], [1, 2, 1, 1], [1, 1, 0.5, 1], [0.5, 1, 0.5, 1]];
+    const a = run(rows, 1, { initialCash: 1e-10, commissionRate: 0, slippageRate: 0 });
+    assert.equal(a.ledger[1].cashAfter, 5e-11);
+    assert.equal(a.finalCash, 5e-11);
+    assert.equal(a.closedTradePnl[0].realizedPnl, 5e-11 - 1e-10);
+  });
+
+  it('assumptions echo EXACTLY the three §5.9 fields — extra params properties are not echoed (round-3)', () => {
+    const b = bars(F1);
+    const a = accountBacktest(b, donchianBreakoutBacktest(b, 3),
+      { initialCash: 1000, commissionRate: 0, slippageRate: 0, note: 'metadata that must not leak' });
+    assert.deepStrictEqual(a.assumptions, { initialCash: 1000, commissionRate: 0, slippageRate: 0 });
+  });
+
   it('operative §5.5 pin: entryCost is EXACTLY cashBeforeEntry, never recomputed', () => {
     // Non-dyadic open position (F5, cash 1, r = s = 0.1): the forbidden
     // audit-form recomputation qty × eff × (1+r) yields 0.9999999999999999,
@@ -359,6 +388,8 @@ describe('parameter validation and domain guards', () => {
     for (const [patch, re] of [
       [{ initialCash: 0 }, /initialCash/], [{ initialCash: -5 }, /initialCash/],
       [{ initialCash: Infinity }, /initialCash/], [{ initialCash: '1000' }, /initialCash/],
+      [{ initialCash: NaN }, /initialCash/],
+      [{ commissionRate: '0' }, /commissionRate/], [{ slippageRate: '0' }, /slippageRate/],
       [{ commissionRate: -0.1 }, /commissionRate/], [{ commissionRate: 1 }, /commissionRate/],
       [{ commissionRate: 2 }, /commissionRate/], [{ commissionRate: NaN }, /commissionRate/],
       [{ slippageRate: -0.1 }, /slippageRate/], [{ slippageRate: 1 }, /slippageRate/],
@@ -534,7 +565,10 @@ describe('accounting invariants', () => {
     // ban. Total closure of the literal-threshold class: the fold's only
     // legitimate numeric literals are 0 and 1 — every other literal is a
     // smuggled constant and fails here by value.
-    const literals = [...code.matchAll(/(?<![\w$.])\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g)].map((m) => m[0]);
+    // Round-3: the previous regex required a digit before the dot, so a
+    // leading-dot literal (.000000001) escaped the whitelist. This form
+    // matches integer, decimal, leading-dot, and exponent spellings.
+    const literals = [...code.matchAll(/(?<![\w$.])(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?/g)].map((m) => m[0]);
     for (const lit of literals) {
       assert.ok(lit === '0' || lit === '1', `numeric literal whitelist {0, 1}: found ${lit}`);
     }
@@ -551,6 +585,10 @@ describe('accounting invariants', () => {
     // Round-2: reassociation mutants differ by one ULP on non-dyadic inputs
     // — the §5.2 quantity and commission expressions are pinned in their
     // written IEEE order (the denominator temp does not change rounding).
+    assert.ok(code.includes('rawPrice * (1 + slippageRate)'), 'the written entry effective price');
+    assert.ok(code.includes('rawPrice * (1 - slippageRate)'), 'the written exit effective price');
+    assert.ok(!code.includes('rawPrice + rawPrice'), 'entry effective price is never additively expanded');
+    assert.ok(!code.includes('rawPrice - rawPrice'), 'exit effective price is never additively expanded');
     assert.ok(code.includes('effectivePrice * (1 + commissionRate)'), 'the written entry denominator');
     assert.ok(code.includes('cashBefore / denominator'), 'quantity divides by the written denominator');
     assert.ok(!code.includes('/ effectivePrice /'), 'quantity is never a chained division');
