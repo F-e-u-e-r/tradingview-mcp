@@ -273,6 +273,29 @@ describe('owner RED list', () => {
     assert.deepStrictEqual(a.assumptions, { initialCash: 1000, commissionRate: 0, slippageRate: 0 });
   });
 
+  it('re-entered open position uses CURRENT fold state, coexisting with a terminal pending exit (round-4)', () => {
+    // BT0-valid p=1 trace: entry @10 → exit @8 → re-entry @12, ending with an
+    // unfillable terminal exit signal AND an open position. Machine-verified
+    // exact values: qty1 = 10, exit cash 80, qty2 = 80/12 = 6.666666666666667,
+    // mark 9, markedValue = (80/12) × 9 = 60 exactly in binary64, unrealized
+    // −20, equity [100, 100, 90, 80, 60]. Kills: stale-first-entry-quantity
+    // mutants (ledger[0].quantity = 10 ≠ 6.66…) and mutants that suppress
+    // openPositionAccounting whenever a pendingSignal exists.
+    const rows = [[10, 10, 10, 10], [10, 12, 10, 11], [10, 11, 9, 9], [8, 13, 8, 11], [12, 12, 7, 9]];
+    const b = bars(rows);
+    const ex = donchianBreakoutBacktest(b, 1);
+    assert.deepStrictEqual(ex.pendingSignal, { kind: 'exit', signalIndex: 4, unfillable: true });
+    const p = { initialCash: 100, commissionRate: 0, slippageRate: 0 };
+    assert.deepStrictEqual(accountBacktest(b, ex, p), RESULT(
+      [L('entry', 1, 2, 10, 10, 10, 0, 100, 0), L('exit', 2, 3, 8, 8, 10, 0, 0, 80),
+        L('entry', 3, 4, 12, 12, 80 / 12, 0, 80, 0)],
+      [{ realizedPnl: -20 }],
+      { quantity: 80 / 12, entryCost: 80, markPrice: 9, markedValue: 60, unrealizedPnl: -20 },
+      [100, 100, 90, 80, 60],
+      p, 0,
+    ));
+  });
+
   it('operative §5.5 pin: entryCost is EXACTLY cashBeforeEntry, never recomputed', () => {
     // Non-dyadic open position (F5, cash 1, r = s = 0.1): the forbidden
     // audit-form recomputation qty × eff × (1+r) yields 0.9999999999999999,
@@ -282,6 +305,11 @@ describe('owner RED list', () => {
     assert.equal(a.openPositionAccounting.entryCost, 1);
     assert.equal(a.openPositionAccounting.entryCost, a.ledger[0].cashBefore);
     assert.equal(a.openPositionAccounting.markPrice, 15);
+    // Round-4: unrealizedPnl is the SINGLE subtraction markedValue − entryCost
+    // — a price-form recomputation diverges by ~1e-16 on these non-dyadic
+    // inputs and fails this exact structural identity.
+    assert.equal(a.openPositionAccounting.unrealizedPnl,
+      a.openPositionAccounting.markedValue - a.openPositionAccounting.entryCost);
   });
 
   it('operative §5.5 pin: realizedPnl is the cash form, structurally', () => {
@@ -424,6 +452,15 @@ describe('parameter validation and domain guards', () => {
     // subnormal underflow on a sell: raw MIN_VALUE × (1−0.5) → 0
     const rows2 = [[1, 1, 1, 1], [1, 2, 1, 1], [1, 1, 0.5, 1], [Number.MIN_VALUE, 1, Number.MIN_VALUE, 1]];
     assert.throws(() => run(rows2, 1, { ...p0, slippageRate: 0.5 }), typedError(/exit effective price/));
+  });
+
+  it('guard 1b: entry effective-price OVERFLOW fails as the effective-price stage (round-4)', () => {
+    // Finite raw MAX_VALUE with positive slippage overflows the COMPUTED
+    // effective price to Infinity. A raw-price-only guard mutant lets this
+    // fall through to the denominator stage (a different message).
+    const rows = [[1, 1, 1, 1], [1, 2, 1, 1], [Number.MAX_VALUE, Number.MAX_VALUE, 1, 1]];
+    assert.throws(() => run(rows, 1, { initialCash: 1, commissionRate: 0, slippageRate: 0.5 }),
+      typedError(/entry effective price/));
   });
 
   it('guard 2a: entry denominator overflow fails by its OWN name (not masked by a later guard)', () => {
