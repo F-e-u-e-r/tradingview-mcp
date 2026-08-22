@@ -134,7 +134,10 @@ export function accountBacktest(bars, execution, params) {
       if (!Number.isFinite(net) || net <= 0) {
         fail(`computed exit net proceeds must be finite and > 0, got: ${net}`);
       }
-      cash = requireFinite(cashBefore + net, 'computed exit cashAfter');
+      // §5.3 operative rule in its WRITTEN evaluation order:
+      // (cashBefore + proceeds) − commission. `net` above exists only for
+      // guard 3; it is not the cash expression (round-1 finding).
+      cash = requireFinite(cashBefore + proceeds - commission, 'computed exit cashAfter');
       ledger.push({
         kind: fill.kind, signalIndex: fill.signalIndex, fillIndex: fill.fillIndex,
         rawPrice, effectivePrice, quantity, commission, cashBefore, cashAfter: cash,

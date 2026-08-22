@@ -207,6 +207,28 @@ describe('owner RED list', () => {
     assert.equal(a.finalCash, 0);
   });
 
+  it('operative D1 pin at HIGH magnitude: no tolerance snap can fake the zero', () => {
+    // At initialCash 1e16 the subtraction residue is ~2 — far above any
+    // plausible "snap small residues to zero" threshold (round-1 found
+    // Math.abs(δ) < 1e-12 and < 1e-6 mutants that pass at small scale).
+    // The definitional rule yields exactly 0 at every scale.
+    const p = { initialCash: 1e16, commissionRate: 0.1, slippageRate: 0.03 };
+    const a = run(F5, 3, p);
+    assert.equal(a.ledger[0].cashAfter, 0);
+    assert.equal(a.finalCash, 0);
+  });
+
+  it('operative §5.5 pin: entryCost is EXACTLY cashBeforeEntry, never recomputed', () => {
+    // Non-dyadic open position (F5, cash 1, r = s = 0.1): the forbidden
+    // audit-form recomputation qty × eff × (1+r) yields 0.9999999999999999,
+    // one ULP off the operative value, which is the stored cashBefore: 1.
+    const p = { initialCash: 1, commissionRate: 0.1, slippageRate: 0.1 };
+    const a = run(F5, 3, p);
+    assert.equal(a.openPositionAccounting.entryCost, 1);
+    assert.equal(a.openPositionAccounting.entryCost, a.ledger[0].cashBefore);
+    assert.equal(a.openPositionAccounting.markPrice, 15);
+  });
+
   it('operative §5.5 pin: realizedPnl is the cash form, structurally', () => {
     // Non-dyadic rates make the price-form formula diverge from the cash
     // form by rounding; the contract binds the cash form.
@@ -302,7 +324,12 @@ describe('normalized comparator conformance (verification-side only)', () => {
 
 describe('parameter validation and domain guards', () => {
   const p0 = { initialCash: 1000, commissionRate: 0, slippageRate: 0 };
-  it('rejects invalid parameters', () => {
+  // Round-1: assert.throws with a bare regex accepts thrown STRINGS; the
+  // contract requires typed errors, so every rejection is checked with a
+  // predicate demanding a real Error carrying the expected message.
+  const typedError = (re) => (err) => err instanceof Error && re.test(err.message);
+
+  it('rejects invalid parameters with typed errors', () => {
     for (const [patch, re] of [
       [{ initialCash: 0 }, /initialCash/], [{ initialCash: -5 }, /initialCash/],
       [{ initialCash: Infinity }, /initialCash/], [{ initialCash: '1000' }, /initialCash/],
@@ -311,40 +338,71 @@ describe('parameter validation and domain guards', () => {
       [{ slippageRate: -0.1 }, /slippageRate/], [{ slippageRate: 1 }, /slippageRate/],
       [{ slippageRate: NaN }, /slippageRate/],
     ]) {
-      assert.throws(() => run(F1, 3, { ...p0, ...patch }), re);
+      assert.throws(() => run(F1, 3, { ...p0, ...patch }), typedError(re));
     }
   });
-  it('rejects non-array bars and malformed execution input', () => {
-    assert.throws(() => accountBacktest(null, donchianBreakoutBacktest(bars(F1), 3), p0), /bars/);
-    assert.throws(() => accountBacktest(bars(F1), null, p0), /execution/);
-    assert.throws(() => accountBacktest(bars(F1), {}, p0), /execution/);
+
+  it('parameters are REQUIRED — missing params or fields fail loud, no silent defaults', () => {
+    // Round-1: a destructuring-defaults mutant ({ initialCash = 1000, … })
+    // silently accepted omissions; the owner rule is explicit parameters.
+    const ex = donchianBreakoutBacktest(bars(F1), 3);
+    assert.throws(() => accountBacktest(bars(F1), ex, undefined), typedError(/params/));
+    assert.throws(() => accountBacktest(bars(F1), ex, null), typedError(/params/));
+    assert.throws(() => accountBacktest(bars(F1), ex, {}), typedError(/initialCash/));
+    assert.throws(() => accountBacktest(bars(F1), ex, { commissionRate: 0, slippageRate: 0 }), typedError(/initialCash/));
+    assert.throws(() => accountBacktest(bars(F1), ex, { initialCash: 1000, slippageRate: 0 }), typedError(/commissionRate/));
+    assert.throws(() => accountBacktest(bars(F1), ex, { initialCash: 1000, commissionRate: 0 }), typedError(/slippageRate/));
   });
+
+  it('rejects non-array bars and malformed execution input', () => {
+    assert.throws(() => accountBacktest(null, donchianBreakoutBacktest(bars(F1), 3), p0), typedError(/bars/));
+    assert.throws(() => accountBacktest(bars(F1), null, p0), typedError(/execution/));
+    assert.throws(() => accountBacktest(bars(F1), {}, p0), typedError(/execution/));
+  });
+
   it('guard 1: computed effective price must be finite and strictly positive', () => {
-    // raw 0 → effective 0 (either side)
+    // raw 0 → effective 0 (entry side)
     const rows = [[1, 1, 1, 1], [1, 2, 1, 1], [0, 3, 0, 1]];
-    assert.throws(() => run(rows, 1, p0), /effective price/);
+    assert.throws(() => run(rows, 1, p0), typedError(/entry effective price/));
     // subnormal underflow on a sell: raw MIN_VALUE × (1−0.5) → 0
     const rows2 = [[1, 1, 1, 1], [1, 2, 1, 1], [1, 1, 0.5, 1], [Number.MIN_VALUE, 1, Number.MIN_VALUE, 1]];
-    assert.throws(() => run(rows2, 1, { ...p0, slippageRate: 0.5 }), /effective price/);
+    assert.throws(() => run(rows2, 1, { ...p0, slippageRate: 0.5 }), typedError(/exit effective price/));
   });
-  it('guard 2: entry denominator overflow and quantity underflow fail loud', () => {
+
+  it('guard 2a: entry denominator overflow fails by its OWN name (not masked by a later guard)', () => {
+    // Round-1: /denominator|quantity/ let a deleted denominator guard pass
+    // (the quantity guard fired instead). Each guard stage is discriminated
+    // by its exact message.
     const rowsBig = [[1, 1, 1, 1], [1, 2, 1, 1], [Number.MAX_VALUE, Number.MAX_VALUE, 1, 1]];
-    assert.throws(() => run(rowsBig, 1, { initialCash: 1, commissionRate: 0.5, slippageRate: 0 }), /denominator|quantity/);
+    assert.throws(() => run(rowsBig, 1, { initialCash: 1, commissionRate: 0.5, slippageRate: 0 }), typedError(/entry denominator/));
+  });
+
+  it('guard 2b: entry quantity underflow fails by its own name', () => {
     const rowsTiny = [[1, 1, 1, 1], [1, 2, 1, 1], [2, 3, 2, 2]];
-    assert.throws(() => run(rowsTiny, 1, { initialCash: Number.MIN_VALUE, commissionRate: 0, slippageRate: 0 }), /quantity/);
+    assert.throws(() => run(rowsTiny, 1, { initialCash: Number.MIN_VALUE, commissionRate: 0, slippageRate: 0 }), typedError(/entry quantity/));
   });
-  it('guard 3: a zero exit net (commission rounds to proceeds) fails loud', () => {
-    // qty 1 (cash 1, entry raw/eff 1), exit raw MIN_VALUE, r just below 1:
-    // proceeds = MIN_VALUE; commission = MIN_VALUE × r rounds to MIN_VALUE;
-    // net rounds to 0 → typed error.
+
+  it('guard 3: a zero exit net (commission rounds to proceeds) fails by its own name', () => {
     const rows = [[1, 1, 1, 1], [1, 2, 1, 1], [1, 1, 0.5, 1], [Number.MIN_VALUE, 1, Number.MIN_VALUE, 1]];
-    assert.throws(() => run(rows, 1, { initialCash: 1, commissionRate: 0.9999999999999999, slippageRate: 0 }), /net proceeds/);
+    assert.throws(() => run(rows, 1, { initialCash: 1, commissionRate: 0.9999999999999999, slippageRate: 0 }), typedError(/exit net proceeds/));
   });
-  it('guard 4: a non-finite equity mark fails loud', () => {
-    // qty 1e300 (cash 1e300, entry raw 1); close 1e10 → equity overflows.
+
+  it('guard 4a: a non-finite terminal mark fails as markedValue (not deferred to equity)', () => {
+    // Open at end; markedValue = 1e300 × 1e10 overflows. The markedValue
+    // guard runs BEFORE the equity loop — a deferred-validation mutant
+    // would fail with the equity message instead.
     const rows = [[1, 1, 1, 1], [1, 2, 1, 1], [1, 3, 1, 1e10]];
-    assert.throws(() => run(rows, 1, { initialCash: 1e300, commissionRate: 0, slippageRate: 0 }), /finite/);
+    assert.throws(() => run(rows, 1, { initialCash: 1e300, commissionRate: 0, slippageRate: 0 }), typedError(/markedValue/));
   });
+
+  it('guard 4b: a non-finite mid-series equity sample fails as equity by bar index', () => {
+    // Position enters at bar 2 whose close (1e10) overflows the sample while
+    // the FINAL close (1) keeps markedValue finite — only the equity guard
+    // can catch this one.
+    const rows = [[1, 1, 1, 1], [1, 2, 1, 1], [1, 3, 1, 1e10], [1, 1, 1, 1]];
+    assert.throws(() => run(rows, 1, { initialCash: 1e300, commissionRate: 0, slippageRate: 0 }), typedError(/equity sample at bar 2/));
+  });
+
   it('tiny-but-representable accounts are NOT rejected (no arbitrary minimum)', () => {
     const rows = [[1, 1, 1, 1], [1, 2, 1, 1], [1, 1, 1, 1]];
     const a = run(rows, 1, { initialCash: Number.MIN_VALUE, commissionRate: 0, slippageRate: 0 });
@@ -388,21 +446,53 @@ describe('accounting invariants', () => {
     assert.ok(!/\bimport\b/.test(code), 'no import token anywhere in code');
   });
 
-  it('reaches for no capability and no nondeterminism source', () => {
+  it('reaches for no capability, I/O, or nondeterminism source, and holds no module state', () => {
     for (const banned of [
       /\bprocess\b/, /\bperformance\b/, /\bglobalThis\b/, /\bcrypto\b/,
       /\bfetch\b/, /\bXMLHttpRequest\b/, /\bWebSocket\b/, /\bchild_process\b/,
       /\beval\b/, /\bFunction\b/, /\bDate\b/, /\bMath\.random\b/,
       /\bsetTimeout\b/, /\bsetInterval\b/, /\bsetImmediate\b/, /\brequire\b/,
-      /node:/, /\bfs\b/,
+      /node:/, /\bfs\b/, /\bconsole\b/,
     ]) {
       assert.ok(!banned.test(code), `no ${banned}`);
     }
+    // Round-1: a top-level mutable counter passed the scan — a zero-state
+    // pure fold declares no MODULE-SCOPE let/var (column-0 declarations;
+    // function-local lets are indented and legitimate).
+    assert.ok(!/^(let|var)\s/m.test(code), 'no module-scope let/var declarations');
   });
 
   it('holds no comparator/tolerance machinery — verification lives in tests only (owner ruling)', () => {
-    for (const banned of ['1e-9', 'tolerance', 'epsilon', 'EPSILON', 'residual']) {
+    // Round-1: Math.abs(δ) < 1e-12 and < 0.000001 snap-mutants evaded the
+    // vocabulary ban. Math.abs has no legitimate use in the fold, and no
+    // small scientific-notation literal belongs in product code.
+    for (const banned of ['1e-9', 'tolerance', 'epsilon', 'EPSILON', 'residual', 'Math.abs', 'Math.']) {
       assert.ok(!code.includes(banned), `no ${banned} in product code`);
+    }
+    assert.ok(!/\d+e-\d+/.test(code), 'no small scientific-notation literal in product code');
+  });
+
+  it('operative-rule and guard source pins (contract-mandated, some mathematically redundant)', () => {
+    // The D1 assignment must be the literal definitional zero — no
+    // subtraction, no snapping (round-1 tolerance-state mutants).
+    assert.ok(code.includes('cash = 0;'), 'the literal D1 entry assignment');
+    assert.ok(!/cash\s*=\s*cashBefore\s*-/.test(code), 'entry cash is never a subtraction');
+    // The §5.3 exit expression in its WRITTEN evaluation order (round-1:
+    // cashBefore + net grouped differently).
+    assert.ok(code.includes('cashBefore + proceeds - commission'), 'the written exit cash grouping');
+    // Every §3 guard stage must exist BY NAME — several are mathematically
+    // unreachable given upstream guards, but contractually mandatory, so
+    // their removal must fail statically (round-1 finding).
+    for (const guard of [
+      'computed entry effective price', 'computed entry denominator',
+      'computed entry quantity', 'computed entry commission',
+      'computed exit effective price', 'computed exit proceeds',
+      'computed exit commission', 'computed exit net proceeds',
+      'computed exit cashAfter', 'computed realizedPnl',
+      'computed realizedPnlTotal', 'computed markedValue',
+      'computed unrealizedPnl', 'computed equity sample',
+    ]) {
+      assert.ok(code.includes(guard), `guard stage present: ${guard}`);
     }
   });
 
