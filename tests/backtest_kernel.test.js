@@ -199,6 +199,38 @@ describe('supplementary sequences', () => {
       donchianBreakoutBacktest(bars(rows)),
       result([E('entry', 20, 21, 12)], [], OPEN(20, 21, 12), null),
     );
+    // Distinguisher (round-1 advisory): 19 flat bars + a breakout bar at index
+    // 19 (N = 20). Under the default p=20, i=19 is warm-up → empty result; any
+    // lower default (19, 18, …) would instead emit a terminal entry signal.
+    const rows19 = [...Array.from({ length: 19 }, () => flat10), [10, 15, 10, 14]];
+    assert.deepStrictEqual(donchianBreakoutBacktest(bars(rows19)), EMPTY);
+  });
+
+  it('one-ULP breakouts signal and raw fractional opens fill exactly (strict rules, raw doubles)', () => {
+    // p=1 (ch[i−1] = bar i−1's high/low); δ = Number.EPSILON. 1+δ is the
+    // representable double one ULP above 1; 1−δ (two ULPs below 1) is exactly
+    // representable. Derivation:
+    //   i1 (1, 1+δ, 1, 1):              ch[0]=1/1, flat, 1+δ > 1 → entry signal 1
+    //   i2 (1.23456789, 1.3, 1−δ, 1):   fill @1.23456789 exactly (raw double,
+    //                                   no precision transform); ch[1]=(1+δ)/1,
+    //                                   long, 1−δ < 1 → exit signal 2
+    //   i3 (0.987654321, 1.1, 0.98, 1): fill @0.987654321 exactly; ch[2]=1.3/(1−δ),
+    //                                   flat, 1.1 > 1.3 false
+    // Kills (round-1 findings): fill-price rounding mutants — the fractional
+    // fills are asserted exactly through executions and closedTrades — and
+    // epsilon dead-band mutants — a 1e-9 tolerance on either strict rule
+    // rejects both one-ULP breakouts.
+    const d = Number.EPSILON;
+    const rows = [[1, 1, 1, 1], [1, 1 + d, 1, 1], [1.23456789, 1.3, 1 - d, 1], [0.987654321, 1.1, 0.98, 1]];
+    assert.deepStrictEqual(
+      donchianBreakoutBacktest(bars(rows), 1),
+      result(
+        [E('entry', 1, 2, 1.23456789), E('exit', 2, 3, 0.987654321)],
+        [T(1, 2, 1.23456789, 2, 3, 0.987654321)],
+        null,
+        null,
+      ),
+    );
   });
 });
 
@@ -247,7 +279,15 @@ describe('input validation', () => {
 describe('kernel invariants', () => {
   const src = readFileSync(join(here, '../src/analytics/backtest.js'), 'utf8');
   // Scan CODE only — comments legitimately describe capabilities they forbid.
-  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  // Block comments, full-line comments, AND trailing `//` comments are all
+  // stripped (round-1: a trailing comment previously survived the filter).
+  // The trailing strip is a plain regex; safe here because this module's only
+  // string literals are its two error messages, which contain no slashes.
+  const code = src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .map((l) => l.replace(/\/\/.*$/, ''))
+    .join('\n');
 
   it('imports exactly the A1 kernel and nothing else', () => {
     const imports = [...code.matchAll(/\bimport\b[^;]*;/g)].map((m) => m[0]);
@@ -255,13 +295,37 @@ describe('kernel invariants', () => {
     assert.match(imports[0], /from\s*'\.\/indicators\.js'/, 'the single import is ./indicators.js');
     const rest = code.replace(imports[0], '');
     assert.ok(!/\bimport\b/.test(rest), 'no further import token in code');
-    assert.ok(!/require\(/.test(rest), 'no require');
   });
 
   it('reaches for no capability and no nondeterminism source', () => {
-    for (const banned of ['fetch', 'XMLHttpRequest', 'WebSocket', 'process.', 'fs.', 'child_process',
-      'eval(', 'Function(', 'node:', 'Date', 'Math.random', 'setTimeout', 'setInterval']) {
-      assert.ok(!code.includes(banned), `no ${banned}`);
+    // Word-boundary regexes so optional chaining (`process?.`), bare global
+    // references, and dynamic import() cannot slip past a substring scan
+    // (round-1 finding: `process?.hrtime.bigint()` evaded 'process.').
+    const rest = code.replace(/\bimport\b[^;]*;/, '');
+    for (const banned of [
+      /\bprocess\b/, /\bperformance\b/, /\bglobalThis\b/, /\bcrypto\b/,
+      /\bfetch\b/, /\bXMLHttpRequest\b/, /\bWebSocket\b/, /\bchild_process\b/,
+      /\beval\b/, /\bFunction\b/, /\bDate\b/, /\bMath\.random\b/,
+      /\bsetTimeout\b/, /\bsetInterval\b/, /\bsetImmediate\b/, /\brequire\b/,
+      /\bimport\s*\(/, /\bimport\b/, /node:/, /\bfs\b/,
+    ]) {
+      assert.ok(!banned.test(rest), `no ${banned}`);
+    }
+  });
+
+  it('consumes the A1 channel — named tripwire for the §3 / clause-10 consumption rule', () => {
+    // Token-level tripwire, not a semantic proof (semantic conformance is the
+    // review's job): the sanctioned call shape must exist exactly once, its
+    // destructured bands must be the ones consumed at [t − 1], and no local
+    // channel arithmetic may appear in this module (round-1 finding: a mutant
+    // kept a no-op donchian() call and recomputed the window locally).
+    assert.match(code, /const \{ upper, lower \} = donchian\(highs, lows, period\);/,
+      'the exact sanctioned donchian call shape');
+    assert.equal([...code.matchAll(/\bdonchian\s*\(/g)].length, 1, 'donchian is called exactly once');
+    assert.ok(code.includes('upper[t - 1]'), 'upper consumed at [t - 1]');
+    assert.ok(code.includes('lower[t - 1]'), 'lower consumed at [t - 1]');
+    for (const banned of ['Math.max', 'Math.min', 'Infinity']) {
+      assert.ok(!code.includes(banned), `no local channel arithmetic: ${banned}`);
     }
   });
 
