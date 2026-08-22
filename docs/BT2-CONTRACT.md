@@ -33,6 +33,16 @@ The equity series is derived state, never an independent calculation that
 "roughly agrees". §5.7 gives the reconstruction equations; every fixture in
 §7 demonstrates the identity end-to-end.
 
+**Reconstruction basis (precision of the invariant — D7, for owner
+ratification).** Marked values require mark prices, and mark prices are
+input data, not derivable from fills: two bar series identical except for
+their closes produce the same execution ledger but different equity. The
+invariant's reconstruction basis is therefore, precisely: **the execution
+ledger + the explicit cost assumptions + the mark series (the input bars'
+raw closes)**. Nothing else — no hidden state, no independent calculation —
+may enter any reported number. This is a precision of the pre-registered
+wording, not a weakening; the owner ratifies it as D7.
+
 ### 1.3 Execution-layer ground truth
 
 The BT1 closure statement (owner, verbatim) is the execution semantics this
@@ -81,20 +91,32 @@ arrive as explicit parameters; a zero-cost run states its zeros explicitly.
 | param | domain | meaning |
 |---|---|---|
 | `initialCash` | finite, > 0 | starting cash |
-| `commissionRate` | finite, ≥ 0 | per-side proportional commission, charged on **effective notional** (quantity × effective price) at every fill |
+| `commissionRate` | finite, **0 ≤ r < 1** | per-side proportional commission, charged on **effective notional** (quantity × effective price) at every fill |
 | `slippageRate` | finite, 0 ≤ s < 1 | deterministic adverse price adjustment on the **raw fill price**: buys fill at `raw × (1+s)`, sells at `raw × (1−s)` |
 
 Violations fail loud with typed errors (the A1 approved-delta doctrine).
 Stochastic fill models remain deferred (roadmap Not-now).
 
-**Domain guard (degenerate prices).** The accounting model requires every
-fill's **effective price to be strictly positive** — the all-in quantity is
-undefined otherwise, and negative proceeds would silently break the
-no-leverage-by-construction property. A fill whose effective price is ≤ 0
-fails loud with a typed error. This is a declared explicit boundary, not a
-data policy: the validated OHLCV path serves real market prices, and the
-guard makes that assumption checkable instead of silent. (With `s < 1`,
-the guard is equivalent to requiring positive raw fill prices.)
+**Why `r < 1` is load-bearing (round-1 finding):** with `r ≥ 1`, an exit's
+net proceeds `qty × eff × (1−r)` are zero or negative — cash could go into
+debt and a later all-in entry would produce a negative "long" quantity,
+silently violating the long-only / no-leverage semantics. Under the domains
+above and the guard below, **cash can never become negative**: entries
+deploy exactly the balance (§5.2), and exits add strictly positive net
+proceeds.
+
+**Domain guard (degenerate and non-finite values; round-1 findings).** The
+**computed** effective price — the binary64 result of the §5.2/§5.3
+multiplication, not the raw price — must be **finite and strictly
+positive**; otherwise the fill fails loud with a typed error. (Checking the
+raw price is NOT equivalent: a positive subnormal raw price can underflow
+to an effective price of exactly 0, and a huge finite raw price can
+overflow to Infinity.) Additionally, every derived ledger and result value
+(quantity, commission, cashBefore/cashAfter, markedValue, equity) must be
+finite; a non-finite derived value is a typed error — results never carry
+NaN or Infinity. This is a declared explicit boundary, not a data policy:
+the validated OHLCV path serves real market prices, and the guards make
+that assumption checkable instead of silent.
 
 ---
 
@@ -127,7 +149,11 @@ the guard is equivalent to requiring positive raw fill prices.)
 
 `cash = initialCash`, no position, empty ledger — aligned with BT0 §4.1's
 initial flat state. Since the earliest possible fill is bar `p+1 ≥ 2`,
-`equity[0] = initialCash` always.
+`equity[0] = initialCash` whenever `N > 0`. **Empty input (`N = 0`, a
+well-formed BT0 no-op) is defined explicitly:** `equitySeries = []`,
+`finalCash = finalEquity = initialCash`, `realizedPnlTotal = 0`,
+`unrealizedPnl = 0`, ledger empty, `openPositionAccounting = null` — the
+master identity holds trivially.
 
 ### 5.2 Entry fill (BT1 execution, kind = entry, at bar t)
 
@@ -135,8 +161,15 @@ initial flat state. Since the earliest possible fill is bar `p+1 ≥ 2`,
 effectivePrice = rawPrice × (1 + slippageRate)
 quantity       = cashBefore / (effectivePrice × (1 + commissionRate))   [D1]
 commission     = quantity × effectivePrice × commissionRate
-cashAfter      = cashBefore − quantity × effectivePrice − commission  (= 0 exactly under D1)
+cashAfter      := 0        — BY DEFINITION under D1 (all-in deploys the
+                            entire balance; this is the operative rule)
 ```
+
+The subtraction form `cashBefore − quantity × effectivePrice − commission`
+equals 0 in exact real arithmetic and is retained for audit; it is **not**
+the operative binary64 rule — round-1 found it admits two IEEE grouping
+readings with residues on the order of one ULP. The operative rule has
+exactly one reading: the entry consumes the balance, `cashAfter` is 0.
 
 ### 5.3 Exit fill (kind = exit, at bar t)
 
@@ -155,14 +188,19 @@ One record per BT1 execution, chronological (same order as BT1's
 
 ### 5.5 Realized and unrealized P&L
 
-- Per closed trade:
-  `realizedPnl = quantity × (effExit × (1 − r) − effEntry × (1 + r))`
-  — identically `cashAfterExit − cashBeforeEntry` under D1 (the fixtures
-  demonstrate both forms agree).
-- `realizedPnlTotal` = sum over closed trades.
-- Open position at end (if any): `entryCost = quantity × effEntry × (1+r)`
-  (= the cash consumed), `markedValue = quantity × close[N−1]`,
-  `unrealizedPnl = markedValue − entryCost`. If flat: unrealizedPnl = 0.
+- Per closed trade, the **operative** definition (one IEEE subtraction,
+  exactly one reading):
+  `realizedPnl := cashAfterExit − cashBeforeEntry`.
+  The price form `quantity × (effExit × (1 − r) − effEntry × (1 + r))` is
+  its exact-real-arithmetic equivalent under D1, retained for audit; in
+  binary64 the two may differ by rounding on non-dyadic inputs (round-1
+  measurement: ~1e-17 relative-scale differences) — the cash form governs.
+- `realizedPnlTotal` = sum over closed trades, in ledger order.
+- Open position at end (if any): `entryCost := cashBeforeEntry` (= the cash
+  the entry consumed, exactly, under D1's operative rule; equals
+  `quantity × effEntry × (1+r)` in exact real arithmetic),
+  `markPrice = close[N−1]` (recorded), `markedValue = quantity × markPrice`,
+  `unrealizedPnl := markedValue − entryCost`. If flat: unrealizedPnl = 0.
 
 ### 5.6 Equity series
 
@@ -173,33 +211,46 @@ One value per bar, aligned to bars, state **as of completion of bar t**
 equity[t] = cash_asof(t) + (positioned_asof(t) ? quantity × close[t] : 0)
 ```
 
-`finalEquity = equity[N−1]`. The series is derived, never authoritative on
-its own (§1.2).
+`finalEquity = equity[N−1]` when `N > 0`, and `= initialCash` when `N = 0`
+(§5.1). The series is derived, never authoritative on its own (§1.2); the
+marks it uses are the input bars' raw closes (§1.2 D7).
 
 ### 5.7 Reconciliation (the §1.2 invariant, operational)
 
-Given the ledger and the three parameters, every reported number is
-reconstructible:
+Given the ledger, the three parameters, and the mark series (§1.2 D7),
+every reported number is reconstructible:
 
 - `cashBefore₁ = initialCash`; `cashBefore₍ₖ₊₁₎ = cashAfterₖ`; the §5.2–5.3
-  equations regenerate every ledger field from `{kind, rawPrice}` alone.
+  operative rules regenerate every ledger field from `{kind, rawPrice}`
+  alone; equity joins the resulting cash/position trajectory with the
+  close-price marks per §5.6.
 - `finalCash = cashAfter` of the last ledger entry (or `initialCash` if the
   ledger is empty).
-- **Master identity (must hold in every conforming result):**
+- **Master identity:**
 
 ```text
-equity[N−1] = initialCash + realizedPnlTotal + unrealizedPnl
+finalEquity = initialCash + realizedPnlTotal + unrealizedPnl
 ```
 
-The identity is a theorem of the model, not a per-fixture accident:
-`finalCash = initialCash + Σ(exit net proceeds) − Σ(entry deployments)`;
-closed entry/exit pairs contribute exactly their `realizedPnl`, and an
-unmatched open entry contributes `−entryCost`. Therefore
-`equity[N−1] = finalCash + (open ? markedValue : 0)
-= initialCash + realizedPnlTotal + (open ? markedValue − entryCost : 0)
-= initialCash + realizedPnlTotal + unrealizedPnl`. A conforming
-implementation cannot violate it without breaking one of the §5.2–5.6
-equations; every fixture in §7 additionally closes it by hand.
+The identity is a theorem of the model **in exact real arithmetic**, not a
+per-fixture accident: `finalCash = initialCash + Σ(exit net proceeds) −
+Σ(entry deployments)`; closed entry/exit pairs contribute exactly their
+`realizedPnl`, and an unmatched open entry contributes `−entryCost`.
+Therefore `finalEquity = finalCash + (open ? markedValue : 0) =
+initialCash + realizedPnlTotal + unrealizedPnl`. (For `N = 0` it holds by
+the §5.1 definitions.)
+
+**Binary64 conformance (round-1 finding).** Reported values are raw
+doubles computed by the operative rules in their written evaluation order.
+Under D1's operative `cashAfter := 0` and the cash-form P&L definitions,
+the remaining floating error in the identity is a few ULP of accumulated
+rounding on non-dyadic inputs (round-1 measured ~1e-13 relative-scale
+before the operative rules; smaller after). A conforming implementation
+must satisfy the master identity **exactly on dyadic-exact inputs** (all §7
+fixtures — exact equality is safe there) and **within relative tolerance
+1e-9** (with absolute floor 1e-9 for near-zero sides) on arbitrary
+in-domain inputs. The tolerance is a verification bound for IEEE rounding,
+never a licence for an independent equity calculation (§1.2).
 
 ### 5.8 End-state separation
 
@@ -214,21 +265,29 @@ not force one either).
 ledger[]                 §5.4, chronological
 realizedPnlTotal
 closedTradePnl[]         one per BT1 closed trade, aligned by index
-openPositionAccounting   null | {quantity, entryCost, markedValue, unrealizedPnl}
+openPositionAccounting   null | {quantity, entryCost, markPrice, markedValue, unrealizedPnl}
 equitySeries[]           §5.6, one per bar
 initialCash, finalCash, finalEquity
 assumptions              {initialCash, commissionRate, slippageRate} echoed —
                          results carry their explicit cost assumptions
 ```
 
-### 5.10 Precision
+### 5.10 Precision (two-level semantics)
 
-Raw doubles throughout; the accounting layer applies no rounding (the
-A2/BT0 transparent-transport rule). The §7 fixtures deliberately use
-**dyadic rates and exactly-representable values** so every product and sum
-below is exact in binary64 — hand arithmetic and machine arithmetic agree
-to the last bit, and conforming tests may compare exactly on these
-fixtures. The model itself accepts any finite decimal inputs.
+- **Model semantics** are defined over exact real arithmetic — that is
+  where the §5.7 identity is a theorem and the audit-form equations hold
+  identically.
+- **Operative binary64 semantics**: raw doubles throughout, no rounding
+  step anywhere (the A2/BT0 transparent-transport rule); each operative
+  rule is evaluated in its written order and has exactly one IEEE reading
+  (`cashAfter := 0` at entry, cash-form P&L, single-subtraction
+  unrealized). Reconciliation conformance is exact on dyadic inputs and
+  tolerance-bounded (§5.7) on arbitrary in-domain inputs.
+- The §7 fixtures deliberately use **dyadic rates and exactly-representable
+  values** so every product, quotient and sum below is exact in binary64 —
+  hand arithmetic and machine arithmetic agree to the last bit, and
+  conforming tests may compare exactly on these fixtures. The model itself
+  accepts any in-domain finite inputs.
 
 ---
 
@@ -310,9 +369,10 @@ F5 execution: entry fill bar 4 @ raw 13, held to end. Closes: 10, 10, 10,
 
 Entry: eff 13, qty = 1300/13 = **100**, cashAfter 0.
 Equity: [1300, 1300, 1300, 1300, 1500, 1500].
-openPositionAccounting: {quantity 100, entryCost 1300, markedValue
-100×15 = 1500, unrealizedPnl **+200**}. Realized = 0; closed trades = 0.
-**1500 = 1300 + 0 + 200** ✓. No force-close; marked, not liquidated (D2).
+openPositionAccounting: {quantity 100, entryCost 1300, markPrice 15,
+markedValue 100×15 = 1500, unrealizedPnl **+200**}. Realized = 0; closed
+trades = 0. **1500 = 1300 + 0 + 200** ✓. No force-close; marked, not
+liquidated (D2).
 
 ### AF6 — signal without fill has zero accounting effect — over BT0 F4
 
@@ -370,6 +430,7 @@ else. 420 = 1300 − 880 + 0 ✓.
 | D4 | Cost semantics | **Slippage: proportional on raw price, adverse both sides. Commission: proportional on effective notional, per side.** Alternatives: bps integers, flat per-trade. |
 | D5 | Equity sampling | **One value per completed bar at its raw close**, fills effective within their own bar. |
 | D6 | Result field names | Conceptual names, structure binding (the A2 convention), per §5.9. |
+| D7 | Reconstruction basis | **Ledger + explicit cost assumptions + the mark series (input bars' raw closes)** — a precision of the pre-registered invariant's wording, required because marks are input data not derivable from fills (§1.2). |
 
 ---
 
