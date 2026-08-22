@@ -235,9 +235,11 @@ Given the ledger, the three parameters, and the mark series (§1.2 D7),
 every reported number is reconstructible:
 
 - `cashBefore₁ = initialCash`; `cashBefore₍ₖ₊₁₎ = cashAfterₖ`; the §5.2–5.3
-  operative rules regenerate every ledger field from `{kind, rawPrice}`
-  alone; equity joins the resulting cash/position trajectory with the
-  close-price marks per §5.6.
+  operative rules regenerate **every BT2-added accounting field** from the
+  full BT1 execution record (which carries kind, signalIndex, fillIndex and
+  rawPrice — the fill indexes align state changes with the mark series)
+  plus the fold state; equity joins the resulting cash/position trajectory
+  with the close-price marks per §5.6.
 - `finalCash = cashAfter` of the last ledger entry (or `initialCash` if the
   ledger is empty).
 - **Master identity:**
@@ -268,20 +270,44 @@ because `1 − 2⁵⁴` is not representable). Therefore:
   every product, quotient, sum and difference has been verified exactly
   representable value-by-value — not for dyadic inputs in general.
 - On arbitrary in-domain inputs, a conforming implementation must satisfy
-  the explicit comparator
+  the scale-aware comparator, **evaluated in its overflow-safe normalized
+  form** (round-3: the un-normalized sum `initialCash + realizedPnlTotal +
+  unrealizedPnl` can overflow to Infinity on a valid, fully guarded ledger
+  with magnitudes near `MAX_VALUE`, making a direct binary64 reading
+  non-total):
 
 ```text
-|finalEquity − (initialCash + realizedPnlTotal + unrealizedPnl)| ≤ 1e-9 × S
+| finalEquity/S − (initialCash/S + realizedPnlTotal/S + unrealizedPnl/S) | ≤ 1e-9
+
 S = max(1, initialCash, |finalEquity|, |realizedPnlTotal|, |unrealizedPnl|,
         maxₖ cashBeforeₖ, maxₖ |cashAfterₖ|, maxₖ (quantityₖ × effectivePriceₖ),
         entryCost and markedValue when a position is open)
+        — the maxₖ terms are omitted when the ledger is empty (the floor
+          of 1 then governs)
 ```
 
-  a scale-aware forward-error bound: IEEE rounding of the operative fold
-  accumulates error of order `n·u·S` (`u ≈ 1.1e-16`, `n` = ledger length ≤
-  a few hundred under the ≤500-bar contract), leaving ≥4 orders of margin
-  below `1e-9 × S`. The bound is a verification instrument for IEEE
-  rounding, never a licence for an independent equity calculation (§1.2).
+  Dividing every term by `S` first keeps each normalized term in `[−1, 1]`
+  and the sums within a few units — no intermediate can overflow — at the
+  cost of a few extra ULP of division rounding, negligible against `1e-9`.
+  Evaluating the predicate in exact rational (or otherwise widened)
+  arithmetic over the stored doubles is equally conforming: the raw-double
+  rule binds the product layer's REPORTED values, not verification-side
+  tooling. The bound itself is a scale-aware forward-error bound: IEEE
+  rounding of the operative fold accumulates error of order `n·u·S`
+  (`u ≈ 1.1e-16`, `n` = ledger length ≤ a few hundred under the ≤500-bar
+  contract), leaving ≥4 orders of margin below `1e-9 × S`.
+
+  **Extreme-value conformance example (round-3, machine-verified over the
+  CLOSED BT1 kernel):** `p = 1`, `A = MAX_VALUE/2`, `B = 2⁹⁶⁹`,
+  `initialCash = A`, zero costs, a valid trace entry@`A` → exit@`B` →
+  entry@`B` ending open with the final close `MAX_VALUE`. All §3 guards
+  pass and every reported value is finite; `realizedPnlTotal = fl(B−A)`,
+  `unrealizedPnl = fl(MAX_VALUE−B) = MAX_VALUE`, `finalEquity =
+  MAX_VALUE` — the un-normalized sum overflows to Infinity, while the
+  normalized residual is 0. A conforming verifier must accept this result.
+
+  The comparator is a verification instrument for IEEE rounding, never a
+  licence for an independent equity calculation (§1.2).
 
 ### 5.8 End-state separation
 
@@ -312,8 +338,10 @@ assumptions              {initialCash, commissionRate, slippageRate} echoed —
   step anywhere (the A2/BT0 transparent-transport rule); each operative
   rule is evaluated in its written order and has exactly one IEEE reading
   (`cashAfter := 0` at entry, cash-form P&L, single-subtraction
-  unrealized). Reconciliation conformance is exact on dyadic inputs and
-  tolerance-bounded (§5.7) on arbitrary in-domain inputs.
+  unrealized). Reconciliation conformance is exact **only on the
+  value-by-value-verified §7 fixtures** and comparator-bounded (§5.7) on
+  all other in-domain inputs — dyadic inputs included (round-3: input
+  dyadicity does not make results representable).
 - The §7 fixtures deliberately use **dyadic rates and exactly-representable
   values** so every product, quotient and sum below is exact in binary64 —
   hand arithmetic and machine arithmetic agree to the last bit, and
