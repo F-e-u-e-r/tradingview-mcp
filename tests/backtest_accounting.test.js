@@ -140,6 +140,28 @@ describe('BT2 contract fixtures (binding oracle, transcribed verbatim)', () => {
     ));
   });
 
+  it('BT0 F12 accounting: closed history intact alongside a terminal pending ENTRY (round-6)', () => {
+    // F12 (ratified BT0 §7): entry s3→f4 @12, exit s4→f5 @9, pending entry
+    // s5 unfillable. cash 1000, zero costs: qty = 1000/12; exit cash =
+    // (1000/12)×9 = 750 exactly in binary64; equity[4] = (1000/12)×8 =
+    // 666.6666666666666 (machine-verified before pinning). The pending
+    // ENTRY has zero accounting effect and must not gate the fold (a
+    // kind-conditional mutant was previously caught only incidentally, by
+    // guard-3b's terminal signal).
+    const F12 = [flat10, flat10, flat10, [10, 12, 10, 11], [12, 12, 7, 8], [9, 20, 8, 19]];
+    const b = bars(F12);
+    const ex = donchianBreakoutBacktest(b, 3);
+    assert.deepStrictEqual(ex.pendingSignal, { kind: 'entry', signalIndex: 5, unfillable: true });
+    const p = { initialCash: 1000, commissionRate: 0, slippageRate: 0 };
+    assert.deepStrictEqual(accountBacktest(b, ex, p), RESULT(
+      [L('entry', 3, 4, 12, 12, 1000 / 12, 0, 1000, 0), L('exit', 4, 5, 9, 9, 1000 / 12, 0, 0, 750)],
+      [{ realizedPnl: -250 }],
+      null,
+      [1000, 1000, 1000, 1000, 666.6666666666666, 750],
+      p, 750,
+    ));
+  });
+
   it('N = 0 (empty input) is the defined §5.1 result', () => {
     const p = { initialCash: 1000, commissionRate: 0.25, slippageRate: 0.25 };
     assert.deepStrictEqual(run([], 3, p), RESULT([], [], null, [], p, 1000));
@@ -515,6 +537,27 @@ describe('parameter validation and domain guards', () => {
       typedError(/entry commission/));
   });
 
+  it('guard 2e: entry commission INFINITY (nonzero rate) fails by name — a NaN-only check misses it (round-6)', () => {
+    // Same rounded-up product overflow as guard 2d, but with r = MIN_VALUE:
+    // commission = Infinity × MIN_VALUE = Infinity (not NaN). A guard
+    // weakened to Number.isNaN passes 2d yet misses this.
+    const rows = [[1, 1, 1, 1], [1, 2, 1, 1], [1.5, 2, 1, 1.5]];
+    assert.throws(() => run(rows, 1, { initialCash: Number.MAX_VALUE, commissionRate: Number.MIN_VALUE, slippageRate: 0 }),
+      typedError(/entry commission/));
+  });
+
+  it('smallest positive exit net (exactly MIN_VALUE) is preserved — identifier-epsilon mutants die (round-6)', () => {
+    // cash 2×MIN_VALUE, entry @1 → qty 1e-323; exit @0.5 → net exactly
+    // Number.MIN_VALUE (5e-324). A guard tightened to net <= MIN_VALUE
+    // falsely rejects it; a snap-to-zero variant falsely zeroes it.
+    const rows = [[1, 1, 1, 1], [1, 2, 1, 1], [1, 1, 0.5, 1], [0.5, 1, 0.5, 1]];
+    const a = run(rows, 1, { initialCash: 2 * Number.MIN_VALUE, commissionRate: 0, slippageRate: 0 });
+    assert.equal(a.ledger[1].cashAfter, Number.MIN_VALUE);
+    assert.equal(a.finalCash, Number.MIN_VALUE);
+    assert.equal(a.finalEquity, Number.MIN_VALUE);
+    assert.equal(a.closedTradePnl[0].realizedPnl, Number.MIN_VALUE - 2 * Number.MIN_VALUE);
+  });
+
   it('guard 3b: exit proceeds overflow fails as exit proceeds, not a later stage (round-5)', () => {
     // Quantity 2 exiting at raw MAX_VALUE: the effective price passes its
     // own guard, proceeds = 2 × MAX = Infinity — a guard that validates the
@@ -630,6 +673,15 @@ describe('accounting invariants', () => {
       for (const banned of BANNED) {
         assert.ok(!banned.test(line), `raw-line scan: no ${banned} in: ${trimmed}`);
       }
+      // Round-6 (advisory closed): module-graph tokens scanned on RAW
+      // non-comment lines too, so a string-embedded '//' cannot hide an
+      // import/re-export from the stripped-code gate. The single sanctioned
+      // export line is the only line allowed to carry 'export'.
+      assert.ok(!/\b(import|from)\b/.test(line), `raw-line scan: no import/from in: ${trimmed}`);
+      if (/\bexport\b/.test(line)) {
+        assert.ok(trimmed.startsWith('export function accountBacktest('),
+          `raw-line scan: only the sanctioned export line may say export: ${trimmed}`);
+      }
     }
     // Round-1/round-2: module-scope mutable state in every spelling —
     // column-0 or indented let/var, and const-backed mutable objects. The
@@ -647,7 +699,8 @@ describe('accounting invariants', () => {
     // Round-1: Math.abs(δ) < 1e-12 and < 0.000001 snap-mutants evaded the
     // vocabulary ban. Math.abs has no legitimate use in the fold, and no
     // small scientific-notation literal belongs in product code.
-    for (const banned of ['1e-9', 'tolerance', 'epsilon', 'EPSILON', 'residual', 'Math.abs', 'Math.']) {
+    for (const banned of ['1e-9', 'tolerance', 'epsilon', 'EPSILON', 'residual', 'Math.abs', 'Math.',
+      'MIN_VALUE', 'MAX_VALUE']) {
       assert.ok(!code.includes(banned), `no ${banned} in product code`);
     }
     assert.ok(!/\d+e-\d+/.test(code), 'no small scientific-notation literal in product code');
