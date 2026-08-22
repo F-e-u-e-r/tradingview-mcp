@@ -98,25 +98,39 @@ Violations fail loud with typed errors (the A1 approved-delta doctrine).
 Stochastic fill models remain deferred (roadmap Not-now).
 
 **Why `r < 1` is load-bearing (round-1 finding):** with `r ≥ 1`, an exit's
-net proceeds `qty × eff × (1−r)` are zero or negative — cash could go into
-debt and a later all-in entry would produce a negative "long" quantity,
-silently violating the long-only / no-leverage semantics. Under the domains
-above and the guard below, **cash can never become negative**: entries
-deploy exactly the balance (§5.2), and exits add strictly positive net
-proceeds.
+net proceeds `qty × eff × (1−r)` are zero or negative in exact real
+arithmetic — cash could go into debt and a later all-in entry would produce
+a negative "long" quantity, silently violating the long-only / no-leverage
+semantics. Under the domains above and the guard below, **cash can never
+become negative and a position can never have zero or negative quantity**:
+entries deploy exactly the balance (§5.2), and the guard enforces — it does
+not merely assume — strictly positive entry quantities and exit nets in the
+computed binary64 values.
 
-**Domain guard (degenerate and non-finite values; round-1 findings).** The
-**computed** effective price — the binary64 result of the §5.2/§5.3
-multiplication, not the raw price — must be **finite and strictly
-positive**; otherwise the fill fails loud with a typed error. (Checking the
-raw price is NOT equivalent: a positive subnormal raw price can underflow
-to an effective price of exactly 0, and a huge finite raw price can
-overflow to Infinity.) Additionally, every derived ledger and result value
-(quantity, commission, cashBefore/cashAfter, markedValue, equity) must be
-finite; a non-finite derived value is a typed error — results never carry
-NaN or Infinity. This is a declared explicit boundary, not a data policy:
-the validated OHLCV path serves real market prices, and the guards make
-that assumption checkable instead of silent.
+**Domain guard (degenerate and non-finite values; round-1/round-2
+findings). The guards apply to computed INTERMEDIATE binary64 values, not
+merely to reported fields.** Each fill must satisfy, in its operative
+evaluation order, all of:
+
+1. the **computed effective price** is finite and strictly positive
+   (checking the raw price is NOT equivalent: a positive subnormal raw
+   price can underflow to exactly 0, and a huge finite raw price can
+   overflow to Infinity);
+2. at entry, the **computed denominator** `effectivePrice × (1 + r)` is
+   finite (a finite effective price can still overflow here), and the
+   **computed quantity** is strictly positive (it can underflow to 0 with
+   every other value finite — a zero-unit "long" that consumed the balance
+   is not a position, it is a bug);
+3. at exit, the **computed net** `proceeds − commission` is strictly
+   positive (at extreme in-domain `r`, a subnormal commission can round to
+   equal the proceeds), so `cashAfter > cashBefore` always;
+4. every derived ledger and result value (quantity, commission,
+   cashBefore/cashAfter, markedValue, equity) is finite — results never
+   carry NaN or Infinity.
+
+Any violation fails loud with a typed error. This is a declared explicit
+boundary, not a data policy: the validated OHLCV path serves real market
+prices, and the guards make that assumption checkable instead of silent.
 
 ---
 
@@ -240,17 +254,34 @@ Therefore `finalEquity = finalCash + (open ? markedValue : 0) =
 initialCash + realizedPnlTotal + unrealizedPnl`. (For `N = 0` it holds by
 the §5.1 definitions.)
 
-**Binary64 conformance (round-1 finding).** Reported values are raw
-doubles computed by the operative rules in their written evaluation order.
-Under D1's operative `cashAfter := 0` and the cash-form P&L definitions,
-the remaining floating error in the identity is a few ULP of accumulated
-rounding on non-dyadic inputs (round-1 measured ~1e-13 relative-scale
-before the operative rules; smaller after). A conforming implementation
-must satisfy the master identity **exactly on dyadic-exact inputs** (all §7
-fixtures — exact equality is safe there) and **within relative tolerance
-1e-9** (with absolute floor 1e-9 for near-zero sides) on arbitrary
-in-domain inputs. The tolerance is a verification bound for IEEE rounding,
-never a licence for an independent equity calculation (§1.2).
+**Binary64 conformance (round-1/round-2 findings).** Reported values are
+raw doubles computed by the operative rules in their written evaluation
+order. Floating error in the identity scales with **the magnitudes that
+flow through the ledger**, not with the final value: catastrophic
+cancellation can leave a residual that is large relative to a small final
+equity while being one ULP relative to the ledger's scale (round-2
+measured examples: operands 2⁵⁴ or 1e16, residual 1 — and note the 2⁵⁴
+case uses only dyadic INPUTS: input dyadicity does not make results exact,
+because `1 − 2⁵⁴` is not representable). Therefore:
+
+- **Exact equality is claimed only for the specific §7 fixtures**, whose
+  every product, quotient, sum and difference has been verified exactly
+  representable value-by-value — not for dyadic inputs in general.
+- On arbitrary in-domain inputs, a conforming implementation must satisfy
+  the explicit comparator
+
+```text
+|finalEquity − (initialCash + realizedPnlTotal + unrealizedPnl)| ≤ 1e-9 × S
+S = max(1, initialCash, |finalEquity|, |realizedPnlTotal|, |unrealizedPnl|,
+        maxₖ cashBeforeₖ, maxₖ |cashAfterₖ|, maxₖ (quantityₖ × effectivePriceₖ),
+        entryCost and markedValue when a position is open)
+```
+
+  a scale-aware forward-error bound: IEEE rounding of the operative fold
+  accumulates error of order `n·u·S` (`u ≈ 1.1e-16`, `n` = ledger length ≤
+  a few hundred under the ≤500-bar contract), leaving ≥4 orders of margin
+  below `1e-9 × S`. The bound is a verification instrument for IEEE
+  rounding, never a licence for an independent equity calculation (§1.2).
 
 ### 5.8 End-state separation
 
@@ -441,7 +472,7 @@ else. 420 = 1300 − 880 + 0 ✓.
 3. narrow Sol + Luna contract review (max effort) on the exact SHA — a
    finding that demands changing BT0/BT1 CLOSED semantics, adding metrics,
    or force-closing positions is a scope violation by owner ruling;
-4. owner adjudication of D1–D6 and surviving findings;
+4. owner adjudication of D1–D7 and surviving findings;
 5. ratification by merging the docs-only PR (CI1 + CI2 as provenance gate).
 
 BT2 implementation (product code + RED→GREEN + its own review rounds)
