@@ -67,6 +67,17 @@ describe('independent contract vectors — derivations in comments, no donor inv
   it('EMA: [2,4,6,8,10] p=3 → seed=SMA(2,4,6)=4; k=0.5; then 8*.5+4*.5=6; 10*.5+6*.5=8', () => {
     assert.deepEqual(ema([2, 4, 6, 8, 10], 3), [null, null, 4, 6, 8]);
   });
+  it('EMA vs SMA DISCRIMINATOR: on [2,4,6,10] p=3 they must differ (xcheck round 1 — an arithmetic progression makes them coincide)', () => {
+    // EMA: seed=SMA(2,4,6)=4; k=0.5; idx3 = 10*.5 + 4*.5 = 7.
+    // SMA: idx3 = (4+6+10)/3 = 20/3 ≈ 6.667. A donor bug implementing EMA as a
+    // rolling SMA would have passed the fixture above AND the port-fidelity
+    // vectors (shared assumption); this case is the correctness discriminator.
+    const e = ema([2, 4, 6, 10], 3);
+    const s = sma([2, 4, 6, 10], 3);
+    assert.deepEqual(e, [null, null, 4, 7]);
+    assertClose(s[3], 20 / 3, 'sma[3]');
+    assert.notEqual(e[3], s[3], 'the fixture must actually discriminate EMA from SMA');
+  });
   it('RSI p=2 on [10,11,10,11]: window gains [1,0] losses [0,1] → RS=1 → 50; next diff +1 → avgG=.75 avgL=.25 → RS=3 → 75', () => {
     const r = rsi([10, 11, 10, 11], 2);
     assert.deepEqual(r.slice(0, 2), [null, null]);
@@ -92,6 +103,17 @@ describe('independent contract vectors — derivations in comments, no donor inv
     assert.equal(r[0], null);
     assertClose(r[1], 5, 'atr[1]');
     assertClose(r[2], 6, 'atr[2]');
+  });
+  it('ATR: each TR branch has a STRICT winner (xcheck round 1 — the original gap bar TIED |L-prevC| with H-L)', () => {
+    // Low-side gap strictly wins: prevC=10, H=8, L=6 →
+    //   TR = max(8-6=2, |8-10|=2, |6-10|=4) = 4 (a two-term max would give 2).
+    assert.deepEqual(atr([10, 8], [10, 6], [10, 7], 1), [null, 4]);
+    // High-side gap strictly wins (owner-added): prevC=10, H=14, L=12 →
+    //   TR = max(14-12=2, |14-10|=4, |12-10|=2) = 4.
+    assert.deepEqual(atr([10, 14], [10, 12], [10, 13], 1), [null, 4]);
+    // H=L doji (zero range): prevC=10, H=L=12 →
+    //   TR = max(0, 2, 2) = 2 — the gap terms, not H-L, carry a zero-range bar.
+    assert.deepEqual(atr([10, 12], [10, 12], [10, 12], 1), [null, 2]);
   });
   it('ATR p=2 hand recurrence: seed=(TR1+TR2)/2, then Wilder', () => {
     // Same bars as above + bar3: H10,L9,C10 with prevC=9 → TR3=max(1,1,0)=1.

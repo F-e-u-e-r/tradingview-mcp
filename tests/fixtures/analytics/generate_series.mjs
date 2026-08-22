@@ -37,9 +37,11 @@ function seriesA() {
   return { highs, lows, closes };
 }
 
-// Series B — deterministic ramp / flat / ramp-down / flat tail (includes
-// constant-price stretches, which exercise the RSI zero-loss branch and
-// zero-range ATR bars when H=L is not forced — here H=C+1, L=C-1).
+// Series B — deterministic ramp / flat / ramp-down / flat tail. The
+// constant-price stretches exercise the RSI zero-loss branch. Note H=C+1 and
+// L=C-1 keep a constant 2-point bar range, so this series contains NO true
+// H=L zero-range bar — that case is pinned by hand-derived ATR fixtures in
+// tests/analytics_indicators.test.js, not by these vectors (xcheck round 1).
 function seriesB() {
   const closes = [];
   for (let i = 0; i < 120; i++) {
