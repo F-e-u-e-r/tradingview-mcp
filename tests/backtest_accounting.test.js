@@ -162,6 +162,57 @@ describe('BT2 contract fixtures (binding oracle, transcribed verbatim)', () => {
     ));
   });
 
+  it('COSTED two round trips: costs recur at every fill, compounding through prior costs (round-7)', () => {
+    // The fixture matrix had a structural hole: every costed case had at
+    // most one trade, and every multi-trade case was zero-cost — so
+    // phase-conditioned mutants (costs correct only for the FIRST trade)
+    // survived. This valid p=1 trace (machine-verified against §5's rules)
+    // closes the {costs × multi-trade} cell:
+    //   trade 1: entry raw 8 → eff 10, denom 12.5, qty 100, comm 250;
+    //            exit raw 24 → eff 18, proceeds 1800, comm 450, cash 1350;
+    //            realized +100.
+    //   trade 2: entry raw 12 → eff 15, denom 18.75, qty 72 (= 1350/18.75,
+    //            compounded THROUGH trade-1 costs), comm 270;
+    //            exit raw 20 → eff 15, proceeds 1080, comm 270, cash 810;
+    //            realized −540. Total −440.
+    const rows = [[10, 10, 10, 10], [10, 12, 10, 11], [8, 11, 7, 9], [24, 25, 23, 24], [12, 20, 10, 15], [20, 21, 19, 20]];
+    const p = { initialCash: 1250, commissionRate: 0.25, slippageRate: 0.25 };
+    assert.deepStrictEqual(run(rows, 1, p), RESULT(
+      [L('entry', 1, 2, 8, 10, 100, 250, 1250, 0), L('exit', 2, 3, 24, 18, 100, 450, 0, 1350),
+        L('entry', 3, 4, 12, 15, 72, 270, 1350, 0), L('exit', 4, 5, 20, 15, 72, 270, 0, 810)],
+      [{ realizedPnl: 100 }, { realizedPnl: -540 }],
+      null,
+      [1250, 1250, 900, 1350, 1080, 810],
+      p, 810,
+    ));
+  });
+
+  it('COSTED non-dyadic re-entry ending open: §5.5 cash forms hold after prior closed history (round-7)', () => {
+    // Closes the {costs × non-dyadic × re-entry-open} cell: after a closed
+    // trade, the re-entry's entryCost must still be the stored cashBefore
+    // (0.6694214876033058 — the recomputed form gives …057) and unrealized
+    // must still be the single subtraction (price form gives …5986). All
+    // doubles machine-verified against the operative §5 rules.
+    const rows = [[1, 1, 1, 1], [1, 2, 1, 1], [0.1, 1, 0.05, 0.1], [0.1, 2, 0.05, 0.1], [0.1, 0.2, 0.1, 0.1]];
+    const a = run(rows, 1, { initialCash: 1, commissionRate: 0.1, slippageRate: 0.1 });
+    assert.equal(a.ledger.length, 3);
+    assert.equal(a.ledger[1].cashAfter, 0.6694214876033058);
+    assert.equal(a.ledger[2].effectivePrice, 0.11000000000000001);
+    assert.equal(a.ledger[2].quantity, 5.532408988457071);
+    assert.equal(a.ledger[2].commission, 0.06085649887302779);
+    assert.deepStrictEqual(a.openPositionAccounting, {
+      quantity: 5.532408988457071,
+      entryCost: 0.6694214876033058,
+      markPrice: 0.1,
+      markedValue: 0.5532408988457072,
+      unrealizedPnl: -0.11618058875759862,
+    });
+    assert.equal(a.openPositionAccounting.entryCost, a.ledger[2].cashBefore);
+    assert.equal(a.openPositionAccounting.unrealizedPnl,
+      a.openPositionAccounting.markedValue - a.openPositionAccounting.entryCost);
+    assert.deepStrictEqual(a.equitySeries, [1, 1, 0.8264462809917354, 0.6694214876033058, 0.5532408988457072]);
+  });
+
   it('N = 0 (empty input) is the defined §5.1 result', () => {
     const p = { initialCash: 1000, commissionRate: 0.25, slippageRate: 0.25 };
     assert.deepStrictEqual(run([], 3, p), RESULT([], [], null, [], p, 1000));
