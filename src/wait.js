@@ -75,13 +75,23 @@ export const LOADING_PROBE_JS = `
 const TIMEFRAME_CANONICAL = new Map([['D', '1D'], ['W', '1W'], ['M', '1M']]);
 
 export function symbolMatches(requested, actual) {
-  const req = String(requested).toUpperCase();
-  const act = String(actual ?? '').toUpperCase();
+  // Fail closed on non-strings and empties: this is an exported surface, and
+  // String(null) === 'NULL' must never match anything (cross-model review).
+  if (typeof requested !== 'string' || typeof actual !== 'string') return false;
+  const req = requested.toUpperCase();
+  const act = actual.toUpperCase();
+  if (!req || !act) return false;
+  // Exact equality is the pre-#5 semantics, deliberately unchanged — even for
+  // shapes outside the measured EXCHANGE:TICKER grammar: if the authoritative
+  // chart reports exactly the requested identity, the chart IS on what was
+  // asked for, and turning that into never-ready would invent a validation
+  // rule the adjudication does not contain (reviewed and rejected-with-reason).
   if (req === act) return true;
   if (!req.includes(':')) {
     // The measured authoritative form is EXCHANGE:TICKER (single colon):
     // compare the part after the first colon, so a bare request matches its
-    // own ticker under any exchange — and nothing else.
+    // own ticker under any exchange — and nothing else. (Against a multi-colon
+    // actual this stays conservative: 'C' does not match 'A:B:C'.)
     const sep = act.indexOf(':');
     if (sep > 0 && act.slice(sep + 1) === req) return true;
   }
@@ -89,8 +99,10 @@ export function symbolMatches(requested, actual) {
 }
 
 export function resolutionMatches(requested, actual) {
-  const req = String(requested).toUpperCase();
-  const act = String(actual ?? '').toUpperCase();
+  if (typeof requested !== 'string' || typeof actual !== 'string') return false;
+  const req = requested.toUpperCase();
+  const act = actual.toUpperCase();
+  if (!req || !act) return false;
   if (req === act) return true;
   return TIMEFRAME_CANONICAL.get(req) === act;
 }
