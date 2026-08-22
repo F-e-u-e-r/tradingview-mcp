@@ -497,6 +497,33 @@ describe('parameter validation and domain guards', () => {
     assert.throws(() => run(rows, 1, { initialCash: 1e300, commissionRate: 0, slippageRate: 0 }), typedError(/equity sample at bar 2/));
   });
 
+  it('guard 2c: quantity overflow to Infinity fails as entry quantity, not a later stage (round-5)', () => {
+    // cash MAX_VALUE with a MIN_VALUE entry price: the denominator passes
+    // (finite), quantity = MAX/MIN = Infinity — a guard that only checks
+    // quantity <= 0 lets this fall through to the commission stage.
+    const rows = [[1, 1, 1, 1], [1, 2, 1, 1], [Number.MIN_VALUE, 1, Number.MIN_VALUE, 1]];
+    assert.throws(() => run(rows, 1, { initialCash: Number.MAX_VALUE, commissionRate: 0, slippageRate: 0 }),
+      typedError(/entry quantity/));
+  });
+
+  it('guard 2d: entry commission NaN (rounded-up product overflow × zero rate) fails by name (round-5)', () => {
+    // q = MAX/1.5 is finite, but fl(q × 1.5) rounds UP to Infinity; with
+    // r = 0 the commission is Infinity × 0 = NaN. The guard must check the
+    // COMPUTED commission, not the quantity operand.
+    const rows = [[1, 1, 1, 1], [1, 2, 1, 1], [1.5, 2, 1, 1.5]];
+    assert.throws(() => run(rows, 1, { initialCash: Number.MAX_VALUE, commissionRate: 0, slippageRate: 0 }),
+      typedError(/entry commission/));
+  });
+
+  it('guard 3b: exit proceeds overflow fails as exit proceeds, not a later stage (round-5)', () => {
+    // Quantity 2 exiting at raw MAX_VALUE: the effective price passes its
+    // own guard, proceeds = 2 × MAX = Infinity — a guard that validates the
+    // effective price instead of the product misses it.
+    const rows = [[1, 1, 1, 1], [1, 2, 1, 1], [1, 1, 0.5, 1], [Number.MAX_VALUE, Number.MAX_VALUE, 1, 1]];
+    assert.throws(() => run(rows, 1, { initialCash: 2, commissionRate: 0, slippageRate: 0 }),
+      typedError(/exit proceeds/));
+  });
+
   it('tiny-but-representable accounts are NOT rejected (no arbitrary minimum)', () => {
     const rows = [[1, 1, 1, 1], [1, 2, 1, 1], [1, 1, 1, 1]];
     const a = run(rows, 1, { initialCash: Number.MIN_VALUE, commissionRate: 0, slippageRate: 0 });
@@ -511,14 +538,34 @@ describe('determinism', () => {
   it('identical input twice → deep-equal results', () => {
     assert.deepStrictEqual(run(F1, 3, p), run(F1, 3, p));
   });
-  it('does not mutate its inputs (runs on frozen bars and frozen execution)', () => {
+  it('does not mutate its inputs (runs on a DEEP-frozen BT1 result — round-5)', () => {
+    // Round-5: only executions were frozen, so mutants writing into
+    // closedTrades / openPosition / pendingSignal survived. Freeze the
+    // complete result graph; in strict-mode ESM any such write throws.
+    const deepFreezeExecution = (ex) => {
+      ex.executions.forEach(Object.freeze);
+      Object.freeze(ex.executions);
+      ex.closedTrades.forEach(Object.freeze);
+      Object.freeze(ex.closedTrades);
+      if (ex.openPosition) Object.freeze(ex.openPosition);
+      if (ex.pendingSignal) Object.freeze(ex.pendingSignal);
+      return Object.freeze(ex);
+    };
     const b = Object.freeze(bars(F1).map((x) => Object.freeze(x)));
-    const ex = donchianBreakoutBacktest(b, 3);
-    Object.freeze(ex);
-    ex.executions.forEach(Object.freeze);
-    Object.freeze(ex.executions);
+    const ex = deepFreezeExecution(donchianBreakoutBacktest(b, 3));
     const a = accountBacktest(b, ex, Object.freeze({ ...p }));
     assert.equal(a.finalCash, 450);
+    // Open position + pending exit, deep-frozen too (the round-4 re-entry
+    // trace) — mutants that write into openPosition die here.
+    const rows = [[10, 10, 10, 10], [10, 12, 10, 11], [10, 11, 9, 9], [8, 13, 8, 11], [12, 12, 7, 9]];
+    const b2 = Object.freeze(bars(rows).map((x) => Object.freeze(x)));
+    const ex2 = deepFreezeExecution(donchianBreakoutBacktest(b2, 1));
+    const a2 = accountBacktest(b2, ex2, Object.freeze({ initialCash: 100, commissionRate: 0, slippageRate: 0 }));
+    assert.equal(a2.openPositionAccounting.markedValue, 60);
+    // Round-5: the exported function itself must carry no persistent state —
+    // a mutant stashing counters on accountBacktest adds an enumerable
+    // own-property.
+    assert.deepStrictEqual(Object.keys(accountBacktest), []);
   });
   it('extra record fields are ignored', () => {
     const withExtras = bars(F1).map((x, i) => ({ time: 1700000000 + i * 60, ...x, volume: 5 }));
@@ -549,8 +596,14 @@ describe('accounting invariants', () => {
     return out;
   }
 
-  it('imports nothing at all (pure fold over its inputs)', () => {
+  it('imports nothing at all and exports exactly the fold (pure module — round-5)', () => {
     assert.ok(!/\bimport\b/.test(code), 'no import token anywhere in code');
+    // Round-5: `export * from "assert"` imports a module with no `import`
+    // token. The only sanctioned export is the single function declaration;
+    // `from` has no other legitimate use in this module.
+    assert.ok(!/\bfrom\b/.test(code), 'no re-export/from clause of any kind');
+    assert.equal([...code.matchAll(/\bexport\b/g)].length, 1, 'exactly one export statement');
+    assert.ok(code.includes('export function accountBacktest('), 'the export is the fold function');
   });
 
   it('reaches for no capability, I/O, or nondeterminism source, and holds no module state', () => {
