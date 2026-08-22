@@ -218,6 +218,32 @@ describe('owner RED list', () => {
     assert.equal(a.finalCash, 0);
   });
 
+  it('sub-micro positive exit cash is preserved exactly — no threshold can snap it (round-2)', () => {
+    // cash 1e-7, entry raw 1, exit raw 0.5 → qty 1e-7, exit cash 5e-8.
+    // A "snap small values to zero" mutant with ANY decimal threshold
+    // (round-2 found `net < 0.000001 ? 0 : …`) destroys this exact value.
+    const rows = [[1, 1, 1, 1], [1, 2, 1, 1], [1, 1, 0.5, 1], [0.5, 1, 0.5, 1]];
+    const a = run(rows, 1, { initialCash: 1e-7, commissionRate: 0, slippageRate: 0 });
+    assert.equal(a.ledger[1].cashAfter, 5e-8);
+    assert.equal(a.finalCash, 5e-8);
+    assert.equal(a.finalEquity, 5e-8);
+    assert.equal(a.closedTradePnl[0].realizedPnl, 5e-8 - 1e-7);
+  });
+
+  it('realizedPnlTotal accumulates in LEDGER order — three cancelling trades discriminate (round-2)', () => {
+    // Valid p=1 trace with fills entry@1 → exit@1e16 → entry@1e16 → exit@1
+    // → entry@1 → exit@2 (cash 1, zero costs). Trade P&Ls are
+    // [1e16, −1e16, 1] (1e16 − 1 rounds to 1e16 at ULP 2). Ledger-order
+    // summation gives (1e16 + −1e16) + 1 = 1; reverse-order gives
+    // (1 + −1e16) + 1e16 = 0. AF7's two trades cannot discriminate this.
+    const rows = [[1, 1, 1, 1], [1, 2, 1, 1], [1, 2, 0.5, 1], [1e16, 2e16, 0.4, 1],
+      [1e16, 1e16, 0.3, 1], [1, 3e16, 0.2, 1], [1, 3, 0.1, 1], [2, 2, 2, 2]];
+    const a = run(rows, 1, { initialCash: 1, commissionRate: 0, slippageRate: 0 });
+    assert.deepStrictEqual(a.closedTradePnl, [{ realizedPnl: 1e16 }, { realizedPnl: -1e16 }, { realizedPnl: 1 }]);
+    assert.equal(a.realizedPnlTotal, 1);
+    assert.equal(a.finalCash, 2);
+  });
+
   it('operative §5.5 pin: entryCost is EXACTLY cashBeforeEntry, never recomputed', () => {
     // Non-dyadic open position (F5, cash 1, r = s = 0.1): the forbidden
     // audit-form recomputation qty × eff × (1+r) yields 0.9999999999999999,
@@ -441,25 +467,59 @@ describe('accounting invariants', () => {
     .split('\n')
     .map((l) => l.replace(/\/\/.*$/, ''))
     .join('\n');
+  // Keep only brace-depth-0 text: what remains is the module scope, with
+  // every function body (and the object literals inside them) stripped —
+  // so a module-scope declaration cannot hide behind indentation.
+  function stripFunctionBodies(text) {
+    let out = '';
+    let depth = 0;
+    for (const ch of text) {
+      if (ch === '{') { depth += 1; continue; }
+      if (ch === '}') { depth -= 1; continue; }
+      if (depth === 0) out += ch;
+    }
+    return out;
+  }
 
   it('imports nothing at all (pure fold over its inputs)', () => {
     assert.ok(!/\bimport\b/.test(code), 'no import token anywhere in code');
   });
 
   it('reaches for no capability, I/O, or nondeterminism source, and holds no module state', () => {
-    for (const banned of [
-      /\bprocess\b/, /\bperformance\b/, /\bglobalThis\b/, /\bcrypto\b/,
+    const BANNED = [
+      /\bprocess\b/, /\bperformance\b/, /\bglobalThis\b/, /\bglobal\b/, /\bcrypto\b/,
       /\bfetch\b/, /\bXMLHttpRequest\b/, /\bWebSocket\b/, /\bchild_process\b/,
       /\beval\b/, /\bFunction\b/, /\bDate\b/, /\bMath\.random\b/,
       /\bsetTimeout\b/, /\bsetInterval\b/, /\bsetImmediate\b/, /\brequire\b/,
       /node:/, /\bfs\b/, /\bconsole\b/,
-    ]) {
+    ];
+    for (const banned of BANNED) {
       assert.ok(!banned.test(code), `no ${banned}`);
     }
-    // Round-1: a top-level mutable counter passed the scan — a zero-state
-    // pure fold declares no MODULE-SCOPE let/var (column-0 declarations;
-    // function-local lets are indented and legitimate).
-    assert.ok(!/^(let|var)\s/m.test(code), 'no module-scope let/var declarations');
+    // Round-2: a `void '//'; void process;` line abused the non-string-aware
+    // comment stripper to hide capability code from the stripped-code scan.
+    // Counter: scan the RAW source line-by-line too — only lines that ARE
+    // comments (after trimming, starting with //, /* or *) are exempt, so a
+    // banned token hidden behind a string-embedded '//' is still seen.
+    // (Consequence: comments may not name banned tokens; the header speaks
+    // of "clock"/"I/O" in plain words for exactly this reason.)
+    for (const line of src.split('\n')) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('*')) continue;
+      for (const banned of BANNED) {
+        assert.ok(!banned.test(line), `raw-line scan: no ${banned} in: ${trimmed}`);
+      }
+    }
+    // Round-1/round-2: module-scope mutable state in every spelling —
+    // column-0 or indented let/var, and const-backed mutable objects. The
+    // module's top level holds ONLY function declarations and the export:
+    // zero module-scope const/let/var of any kind, and the total let-count
+    // equals the eight sanctioned function-local accumulators.
+    assert.ok(!/^\s*(let|var)\s/m.test(stripFunctionBodies(code)), 'no module-scope let/var (any indentation)');
+    assert.ok(!/^\s*const\s/m.test(stripFunctionBodies(code)), 'no module-scope const (state cannot hide in a const object)');
+    assert.equal([...code.matchAll(/\blet\s/g)].length, 9,
+      'exactly the nine sanctioned function-local lets (eight fold accumulators + the equity loop index)');
+    assert.equal([...code.matchAll(/\bvar\s/g)].length, 0, 'no var at all');
   });
 
   it('holds no comparator/tolerance machinery — verification lives in tests only (owner ruling)', () => {
@@ -470,6 +530,14 @@ describe('accounting invariants', () => {
       assert.ok(!code.includes(banned), `no ${banned} in product code`);
     }
     assert.ok(!/\d+e-\d+/.test(code), 'no small scientific-notation literal in product code');
+    // Round-2: a DECIMAL threshold (0.000001) evaded the scientific-notation
+    // ban. Total closure of the literal-threshold class: the fold's only
+    // legitimate numeric literals are 0 and 1 — every other literal is a
+    // smuggled constant and fails here by value.
+    const literals = [...code.matchAll(/(?<![\w$.])\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g)].map((m) => m[0]);
+    for (const lit of literals) {
+      assert.ok(lit === '0' || lit === '1', `numeric literal whitelist {0, 1}: found ${lit}`);
+    }
   });
 
   it('operative-rule and guard source pins (contract-mandated, some mathematically redundant)', () => {
@@ -480,6 +548,18 @@ describe('accounting invariants', () => {
     // The §5.3 exit expression in its WRITTEN evaluation order (round-1:
     // cashBefore + net grouped differently).
     assert.ok(code.includes('cashBefore + proceeds - commission'), 'the written exit cash grouping');
+    // Round-2: reassociation mutants differ by one ULP on non-dyadic inputs
+    // — the §5.2 quantity and commission expressions are pinned in their
+    // written IEEE order (the denominator temp does not change rounding).
+    assert.ok(code.includes('effectivePrice * (1 + commissionRate)'), 'the written entry denominator');
+    assert.ok(code.includes('cashBefore / denominator'), 'quantity divides by the written denominator');
+    assert.ok(!code.includes('/ effectivePrice /'), 'quantity is never a chained division');
+    assert.ok(code.includes('quantity * effectivePrice * commissionRate'), 'the written commission order (left-associated)');
+    assert.ok(!code.includes('(effectivePrice * commissionRate)'), 'commission is never regrouped');
+    // Round-2: under D1 the positioned cash addend is always exactly 0, so
+    // omitting it is output-equivalent — the complete §5.6 expression is
+    // pinned as source text.
+    assert.ok(code.includes('equityCash + equityQuantity * bars[t].close'), 'the complete positioned equity expression');
     // Every §3 guard stage must exist BY NAME — several are mathematically
     // unreachable given upstream guards, but contractually mandatory, so
     // their removal must fail statically (round-1 finding).
