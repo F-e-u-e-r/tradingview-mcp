@@ -55,6 +55,58 @@ export const LOADING_PROBE_JS = `
   })()
 `;
 
+// Issue #5: the identity comparison accepts exactly the canonicalization
+// measured on a live TradingView Desktop session (3.3.0, 2026-08-22) and
+// nothing broader. Measured ground truth: chart.symbol() always returns
+// EXCHANGE:TICKER — a bare requested ticker is exchange-qualified by data
+// routing, and even an explicitly requested exchange can be substituted by
+// data entitlement (NASDAQ:AAPL -> BATS:AAPL on a Cboe-fed account);
+// chart.resolution() reports daily/weekly/monthly as 1D/1W/1M while minute
+// forms round-trip verbatim, and canonical forms are fixed points.
+// Owner-adjudicated matcher contract:
+//   - a BARE symbol request matches an authoritative EXCHANGE:TICKER iff the
+//     ticker part is an exact case-insensitive match;
+//   - an exchange-QUALIFIED request keeps full-identity exactness — a
+//     data-plan substitution stays an HONEST chart_ready:false, never
+//     quietly widened away, and no data-plan normalizer is invented;
+//   - D === 1D, W === 1W, M === 1M, one way only (requested alias ->
+//     canonical); minutes stay exact; no generalized prefix add/strip.
+// Exported so tests can pin the exact matrix.
+const TIMEFRAME_CANONICAL = new Map([['D', '1D'], ['W', '1W'], ['M', '1M']]);
+
+export function symbolMatches(requested, actual) {
+  // Fail closed on non-strings and empties: this is an exported surface, and
+  // String(null) === 'NULL' must never match anything (cross-model review).
+  if (typeof requested !== 'string' || typeof actual !== 'string') return false;
+  const req = requested.toUpperCase();
+  const act = actual.toUpperCase();
+  if (!req || !act) return false;
+  // Exact equality is the pre-#5 semantics, deliberately unchanged — even for
+  // shapes outside the measured EXCHANGE:TICKER grammar: if the authoritative
+  // chart reports exactly the requested identity, the chart IS on what was
+  // asked for, and turning that into never-ready would invent a validation
+  // rule the adjudication does not contain (reviewed and rejected-with-reason).
+  if (req === act) return true;
+  if (!req.includes(':')) {
+    // The measured authoritative form is EXCHANGE:TICKER (single colon):
+    // compare the part after the first colon, so a bare request matches its
+    // own ticker under any exchange — and nothing else. (Against a multi-colon
+    // actual this stays conservative: 'C' does not match 'A:B:C'.)
+    const sep = act.indexOf(':');
+    if (sep > 0 && act.slice(sep + 1) === req) return true;
+  }
+  return false;
+}
+
+export function resolutionMatches(requested, actual) {
+  if (typeof requested !== 'string' || typeof actual !== 'string') return false;
+  const req = requested.toUpperCase();
+  const act = actual.toUpperCase();
+  if (!req || !act) return false;
+  if (req === act) return true;
+  return TIMEFRAME_CANONICAL.get(req) === act;
+}
+
 export async function waitForChartReady(expectedSymbol = null, expectedTf = null, timeout = DEFAULT_TIMEOUT, evaluate = _evaluate) {
   const start = Date.now();
   let lastBarCount = -1;
@@ -97,14 +149,20 @@ export async function waitForChartReady(expectedSymbol = null, expectedTf = null
     }
 
     // Identity must MATCH, not merely contain: a substring test let a request
-    // for one ticker be satisfied by a different one that contains it.
-    if (expectedSymbol && String(state.symbol ?? '').toUpperCase() !== String(expectedSymbol).toUpperCase()) {
+    // for one ticker be satisfied by a different one that contains it. The
+    // matcher accepts exactly the measured canonical aliases and nothing
+    // broader — see symbolMatches/resolutionMatches above (issue #5).
+    // Presence is null/undefined-omitted, never truthiness: an empty-string
+    // expectation is a REAL (never-satisfiable) expectation and must fail the
+    // match rather than silently skip verification (cross-model round 2;
+    // matches the adjudicated presence semantics from issue #3).
+    if (expectedSymbol != null && !symbolMatches(expectedSymbol, state.symbol)) {
       stableCount = 0;
       await new Promise(r => setTimeout(r, POLL_INTERVAL));
       continue;
     }
     // The resolution was passed in and must actually be verified (C5).
-    if (expectedTf && String(state.resolution ?? '').toUpperCase() !== String(expectedTf).toUpperCase()) {
+    if (expectedTf != null && !resolutionMatches(expectedTf, state.resolution)) {
       stableCount = 0;
       await new Promise(r => setTimeout(r, POLL_INTERVAL));
       continue;
