@@ -87,6 +87,15 @@ arrive as explicit parameters; a zero-cost run states its zeros explicitly.
 Violations fail loud with typed errors (the A1 approved-delta doctrine).
 Stochastic fill models remain deferred (roadmap Not-now).
 
+**Domain guard (degenerate prices).** The accounting model requires every
+fill's **effective price to be strictly positive** — the all-in quantity is
+undefined otherwise, and negative proceeds would silently break the
+no-leverage-by-construction property. A fill whose effective price is ≤ 0
+fails loud with a typed error. This is a declared explicit boundary, not a
+data policy: the validated OHLCV path serves real market prices, and the
+guard makes that assumption checkable instead of silent. (With `s < 1`,
+the guard is equivalent to requiring positive raw fill prices.)
+
 ---
 
 ## 4. Definitions
@@ -182,7 +191,15 @@ reconstructible:
 equity[N−1] = initialCash + realizedPnlTotal + unrealizedPnl
 ```
 
-Every fixture in §7 closes this identity by hand.
+The identity is a theorem of the model, not a per-fixture accident:
+`finalCash = initialCash + Σ(exit net proceeds) − Σ(entry deployments)`;
+closed entry/exit pairs contribute exactly their `realizedPnl`, and an
+unmatched open entry contributes `−entryCost`. Therefore
+`equity[N−1] = finalCash + (open ? markedValue : 0)
+= initialCash + realizedPnlTotal + (open ? markedValue − entryCost : 0)
+= initialCash + realizedPnlTotal + unrealizedPnl`. A conforming
+implementation cannot violate it without breaking one of the §5.2–5.6
+equations; every fixture in §7 additionally closes it by hand.
 
 ### 5.8 End-state separation
 
