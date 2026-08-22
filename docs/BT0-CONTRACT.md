@@ -93,18 +93,31 @@ rule, execution timing, terminal-state semantics, the result model, the V1
 assumption set, and the inherited data contract — each pinned by hand-derived
 fixtures (§7) that a reviewer can recompute on paper.
 
-Explicitly **not** defined here (later milestones own them): costs/slippage
-(BT2), equity/P&L accounting (BT2), metrics of any kind (BT3), the strategy
-interface (BT4), MCP schema (BT5). Nothing in this document may be read as
-pre-locking those.
+Explicitly **not** designed here (later milestones own their design):
+costs/slippage (BT2), equity/P&L accounting (BT2), metrics of any kind (BT3),
+the strategy interface (BT4), MCP schema (BT5). Exactly two kinds of
+statement about those milestones appear in this document, and only these:
+
+- the declared V1 assumption set (§4.6), which the BT1 simulation model holds
+  constant; and
+- owner-adjudicated cross-milestone rulings of 2026-08-22, recorded in §4.6
+  and §5 (cost-parameter explicitness, allowlist-gate discipline, tentative
+  naming family, denylist distinction, output honesty).
+
+Those record standing adjudications that bind the later milestones'
+**acceptance**; each milestone's design space remains open within them.
+Nothing else in this document pre-locks a later milestone.
 
 ---
 
 ## 3. Definitions
 
-- **Bars.** The input is the record array served by the repo's validated OHLCV
-  boundary (`core/data.getOhlcv`): `{time, open, high, low, close, volume}`,
-  ascending time, prices as served (8-dp source rounding already applied).
+- **Bars.** The input is the full record array served by the repo's validated
+  OHLCV boundary (`core/data.getOhlcv({ summary:false, … })` — the bar array,
+  not the summary digest): `{time, open, high, low, close, volume}`, ascending
+  time, prices **exactly as returned** — raw doubles; the backtest layer
+  applies no rounding or other precision transform (the same
+  transparent-transport rule the A2 adjudication fixed for indicator values).
   Indexing is **0-based**; `N` = bar count; `p` = Donchian period.
 - **Completed bar.** Bar `i` is *completed* when its OHLC values are final. All
   signal evaluation for bar `i` happens at completion of bar `i`, using only
@@ -135,6 +148,11 @@ pre-locking those.
 No other decision points exist. In particular there is no intra-bar
 evaluation and no same-bar fill.
 
+The final bar is not special at evaluation time: when eligible (`t ≥ p`) its
+completion is evaluated exactly like any other bar's — after any step-1 fill
+at its own open — and a signal formed there is terminal-unfillable (§4.3,
+§4.4). Fixtures F6 and F12 pin both flavors (exit-signal and entry-signal).
+
 ### 4.2 Signal rules (state-dependent; strict inequalities)
 
 - Evaluation eligibility: `i ≥ p` (so `ch[i−1]` exists). Bars `i < p` are
@@ -158,17 +176,31 @@ evaluation and no same-bar fill.
 
 ### 4.4 Terminal state
 
-At end of series the engine must distinguish, explicitly and mutually
-exclusively, all four of:
+At end of series the engine reports two orthogonal kinds of terminal fact —
+they combine; they are never conflated:
 
-1. **No signal** — nothing pending, no position.
-2. **Unfillable terminal signal** — a signal formed on the final bar with no
-   `i+1` to fill on (entry-flavored or exit-flavored).
-3. **Open position at end** — an entered position with no filled exit. It
-   remains reported as an open position with its entry facts; it is **never**
-   silently discarded and **never** counted as a closed trade. (Marking it to
-   a value is BT2's business, not BT1's.)
-4. **Closed round-trip trade(s)** — entry fill + exit fill both occurred.
+- **Live state** — exactly one of the four mutually exclusive
+  position × pending combinations that §4.2's state-dependent rules can
+  produce:
+
+  1. flat, nothing pending (F1);
+  2. flat, unfillable terminal **entry** signal (F4, F12);
+  3. long, nothing pending — an **open position at end** (F5, F11);
+  4. long, unfillable terminal **exit** signal (F6).
+
+  (`flat + pending exit` and `long + pending entry` are unreachable by
+  construction: the exit rule is evaluated only while positioned, the entry
+  rule only while flat.)
+
+- **History** — `closedTrades[]`, independent of the live state. A series may
+  end with closed trades AND an open position or a pending signal: F12 ends
+  with one closed trade *and* a pending entry; a run that re-enters after a
+  round trip ends with closed trades *and* an open position.
+
+An unfillable terminal signal is preserved as data (§4.3) — distinct from "no
+signal". An open position at end remains reported with its entry facts; it is
+**never** silently discarded and **never** counted as a closed trade.
+(Marking it to a value is BT2's business, not BT1's.)
 
 ### 4.5 Result model
 
@@ -189,21 +221,28 @@ totalClosedTrades    == closedTrades.length
 `totalExecutions = 2`, `totalClosedTrades = 1`. The two counts are never
 conflated and both are always reported.
 
+**Ordering (binding).** Both arrays are chronological: `executions` ascending
+by `fillIndex`; `closedTrades` ascending by `exitFillIndex`.
+
 ### 4.6 V1 assumption set (declared, not claimed realistic)
 
 Single instrument; long-only; at most one position at a time; no leverage; no
 pyramiding; no partial fills; no shorting; deterministic fill at next raw
 open; **zero commission and zero slippage in BT1** (costs arrive in BT2 as
-explicit parameters, never hidden defaults). These are declared simulation
-assumptions, not claims about live execution.
+explicit parameters, never hidden defaults — an owner ruling of 2026-08-22
+recorded here; BT2's parameter design is otherwise its own). These are
+declared simulation assumptions, not claims about live execution. The V1
+result model is price-level (§4.5 carries no quantity field); position
+sizing and accounting representation are BT2 design questions inside these
+declared constraints.
 
 ### 4.7 Inherited data contract
 
 BT V1 computes **only** over what the validated OHLCV boundary already serves:
 
-- acquisition exclusively via existing `core/data.getOhlcv` — no new fetch
-  path, no network, no paging, no cap expansion, no precision change, no
-  alternate source representation;
+- acquisition exclusively via existing `core/data.getOhlcv({ summary:false,
+  … })` — the full bar array, no new fetch path, no network, no paging, no
+  cap expansion, no precision change, no alternate source representation;
 - the existing **≤ 500 bars** ceiling stands;
 - the existing two explicit modes (latest-`count` / `from`+`to` window) and
   fail-closed semantics stand, unchanged.
@@ -214,8 +253,11 @@ separate data-capability workstream with its own adjudication; it must not be
 smuggled in through the backtester.
 
 **Warm-up arithmetic (binding, hand-checkable).** With period `p` over `N`
-bars (0-based): evaluation-eligible bars are `i ∈ [p, N−1]`; the last
-*fillable* signal bar is `i = N−2` (its fill lands on `N−1`); a signal on
+bars (0-based): evaluation-eligible bars are the interval `i ∈ [p, N−1]`,
+**empty iff `N ≤ p`** (F9); *fillable* signal bars are `i ∈ [p, N−2]`,
+**empty iff `N ≤ p+1`** — at `N = p+1` the single eligible bar is the final
+bar, so any signal it forms is terminal-unfillable and no fill can ever
+occur. When the eligible interval is non-empty, a signal on the final bar
 `i = N−1` is terminal-unfillable. Worked example at the ceiling — `p = 20`,
 `N = 500`: eligible evaluation bars `i ∈ [20, 499]` (480 bars), fillable
 signal bars `i ∈ [20, 498]` (479 bars), and a bar-499 signal is terminal.
@@ -225,6 +267,9 @@ signal to unfillability.
 ---
 
 ## 5. Global invariants (all BT milestones)
+
+Owner rulings of 2026-08-22, recorded here for traceability (see §2); the
+affected milestones implement them as acceptance conditions.
 
 - **Backtesting ≠ trading execution.** No path from this workstream to
   placing, simulating-into, or reading back a real TradingView/broker order.
@@ -262,20 +307,20 @@ signal to unfillability.
    channel `ch[i−1]`; the signal bar never participates in its own breakout
    threshold. (§3, §4.2; F1, F6, F8.)
 3. **Execution timing.** Signal on completed `i` → fill at raw `open[i+1]`.
-   (§4.3; F1, F5, F6, F7, F10, F11.)
+   (§4.3; F1, F5, F6, F7, F10, F11, F12.)
 4. **No fabricated terminal fill.** Final-bar signal without `i+1` never
-   fills. (§4.3; F4, F6.)
+   fills. (§4.3; F4, F6, F12.)
 5. **Terminal open position.** An open position at series end is explicitly
    preserved — never silently discarded, never counted closed. (§4.4; F5, F6,
    F11.)
 6. **Executions ≠ closed trades.** Fill count and round-trip count are
-   different reported quantities. (§4.5; F1, F6, F10.)
+   different reported quantities. (§4.5; F1, F6, F10, F12.)
 7. **V1 assumptions.** Single instrument, long-only, one position, no
    leverage, no pyramiding, no partial fills; zero commission/slippage in
    BT1. (§4.6; F7.)
 8. **Synthetic hand-derived scenarios.** At minimum: entry, exit, boundary
    equality, warm-up, terminal signal, open-at-end. (§7: F1, F2, F3, F4, F5 —
-   plus F6–F11 beyond the minimum.)
+   plus F6–F12 beyond the minimum.)
 9. **Donor divergence explicitly recorded.** ADAPT-port superseded → DERIVE;
    donor trade vectors demoted to signal oracle; the seven-bar fixture lists
    both models' correct answers side by side. (§1.2; F6.)
@@ -296,6 +341,10 @@ bars ending at `i−1`. Every number is chosen to be recomputable on paper.
 "eval" is the rule actually evaluated per §4.2 (flat → entry only;
 positioned → exit only; warm-up → none).
 
+Discrimination property (deliberate): in every fixture with a fill, the fill
+price differs from the signal bar's close, so a same-bar-close-fill
+implementation fails these fixtures on price as well as on fill index.
+
 ### F1 — Complete round trip (clauses 1, 2, 3, 6)
 
 | i | O | H | L | C | ch[i−1] u/l | state at eval | eval → outcome |
@@ -307,12 +356,13 @@ positioned → exit only; warm-up → none).
 | 4 | 10 | 12 | 10 | 10 | 12 / 10 | long (filled @ open 10) | 10 < 10 false → hold |
 | 5 | 10 | 11 | 10 | 10 | 12 / 10 | long | 10 < 10 false → hold |
 | 6 | 8 | 8 | 7 | 7 | 12 / 10 | long | 7 < 10 → **exit signal** |
-| 7 | 8 | 9 | 8 | 9 | — | fill @ open 8 | (final bar; no further signal) |
+| 7 | 8 | 9 | 8 | 9 | 12 / 7 | fill @ open 8 → flat | 9 > 12 false → no signal |
 
 Channel checks: ch[2] = bars 0–2 → 10/10. ch[3] = bars 1–3 → 12/10. ch[4] =
-bars 2–4 → 12/10. ch[5] = bars 3–5 → 12/10. ch[6] = bars 4–6 → 12/7 (not
-consulted: bar 7 fills the pending exit at its open; at completion of bar 7
-the state is flat and 9 > ch[6].upper=12 is false).
+bars 2–4 → 12/10. ch[5] = bars 3–5 → 12/10. ch[6] = bars 4–6 → 12/7 —
+consulted at the completion of bar 7 like any other eligible bar (§4.1: the
+final bar evaluates after its own open fill): flat, 9 > 12 false, no
+terminal signal.
 
 **Expected:** executions = 2 (entry: signal i=3, fill i=4 @ 10; exit: signal
 i=6, fill i=7 @ 8); closedTrades = 1 (entry 10 → exit 8); openPosition =
@@ -331,7 +381,8 @@ null; pendingSignal = null; totalExecutions = 2, totalClosedTrades = 1.
 ch[2] = bars 0–2 → 12/8. ch[3] = bars 1–3 → 12/9.
 
 **Expected:** executions = 0; closedTrades = 0; openPosition = null;
-pendingSignal = null. Touching the band is never a signal; only strict `>`.
+pendingSignal = null; totalExecutions = 0, totalClosedTrades = 0. Touching
+the band is never a signal; only strict `>`.
 
 ### F3 — Warm-up bars cannot signal (clauses 1, 11)
 
@@ -344,9 +395,9 @@ pendingSignal = null. Touching the band is never a signal; only strict `>`.
 
 ch[2] = bars 0–2 → 25/10.
 
-**Expected:** all-empty result. First evaluation-eligible bar is exactly
-`i = p = 3`; breakout-shaped warm-up bars produce nothing, and their extremes
-correctly enter the channel that bar 3 is judged against.
+**Expected:** all-empty result (both totals 0). First evaluation-eligible bar
+is exactly `i = p = 3`; breakout-shaped warm-up bars produce nothing, and
+their extremes correctly enter the channel that bar 3 is judged against.
 
 ### F4 — Terminal entry signal never fills (clauses 3, 4)
 
@@ -358,8 +409,9 @@ correctly enter the channel that bar 3 is judged against.
 | 3 | 10 | 15 | 10 | 14 | 10 / 10 | flat | 15 > 10 → **entry signal**; no bar 4 |
 
 **Expected:** executions = 0; closedTrades = 0; openPosition = null;
-pendingSignal = {entry, signalIndex 3, unfillable}. Distinct from "no
-signal" (F2/F3) and from an open position (F5).
+pendingSignal = {entry, signalIndex 3, unfillable}; totalExecutions = 0,
+totalClosedTrades = 0. Distinct from "no signal" (F2/F3) and from an open
+position (F5).
 
 ### F5 — Entry fills, never exits → open at end (clauses 3, 5)
 
@@ -369,15 +421,16 @@ signal" (F2/F3) and from an open position (F5).
 | 1 | 10 | 10 | 10 | 10 | — | — | warm-up |
 | 2 | 10 | 10 | 10 | 10 | — | — | warm-up |
 | 3 | 10 | 15 | 10 | 14 | 10 / 10 | flat | 15 > 10 → **entry signal** |
-| 4 | 14 | 16 | 13 | 15 | 15 / 10 | long (filled @ open 14) | 13 < 10 false → hold |
+| 4 | 13 | 16 | 13 | 15 | 15 / 10 | long (filled @ open 13) | 13 < 10 false → hold |
 | 5 | 15 | 16 | 14 | 15 | 16 / 10 | long | 14 < 10 false → hold |
 
 ch[3] = bars 1–3 → 15/10. ch[4] = bars 2–4 → 16/10.
 
-**Expected:** executions = 1 (entry: signal i=3, fill i=4 @ 14);
+**Expected:** executions = 1 (entry: signal i=3, fill i=4 @ 13);
 closedTrades = 0; openPosition = {entrySignalIndex 3, entryFillIndex 4,
-entryPrice 14}; pendingSignal = null. The open position is reported, not
-dropped, and not a closed trade.
+entryPrice 13}; pendingSignal = null; totalExecutions = 1,
+totalClosedTrades = 0. The open position is reported, not dropped, and not a
+closed trade.
 
 ### F6 — Donor seven-bar fixture, dual-model (clauses 2, 4, 5, 6, 9)
 
@@ -421,31 +474,32 @@ totalExecutions = 1, totalClosedTrades = 0.
 | 1 | 10 | 10 | 10 | 10 | — | — | warm-up |
 | 2 | 10 | 10 | 10 | 10 | — | — | warm-up |
 | 3 | 10 | 12 | 10 | 12 | 10 / 10 | flat | 12 > 10 → **entry signal** |
-| 4 | 12 | 15 | 11 | 14 | 12 / 10 | long (filled @ open 12) | exit rule only: 11 < 10 false (15 > 12 **ignored**) |
+| 4 | 13 | 15 | 11 | 14 | 12 / 10 | long (filled @ open 13) | exit rule only: 11 < 10 false (15 > 12 **ignored**) |
 | 5 | 14 | 18 | 13 | 17 | 15 / 10 | long | 13 < 10 false (18 > 15 **ignored**) |
 | 6 | 17 | 17 | 9 | 10 | 18 / 10 | long | 9 < 10 → **exit signal** |
-| 7 | 10 | 11 | 9 | 11 | — | fill @ open 10 | (final bar) |
+| 7 | 11 | 11 | 9 | 11 | 18 / 9 | fill @ open 11 → flat | 11 > 18 false → no signal |
 
 ch[3] = bars 1–3 → 12/10. ch[4] = bars 2–4 → 15/10. ch[5] = bars 3–5 → 18/10.
+ch[6] = bars 4–6 → 18/9, consulted at bar 7's completion (flat): no signal.
 
-**Expected:** executions = 2 (entry fill i=4 @ 12; exit fill i=7 @ 10);
-closedTrades = 1 (12 → 10); openPosition = null; pendingSignal = null. The
-up-breakouts at i=4 and i=5 add **zero** executions: no pyramiding, one
-position.
+**Expected:** executions = 2 (entry fill i=4 @ 13; exit fill i=7 @ 11);
+closedTrades = 1 (13 → 11); openPosition = null; pendingSignal = null;
+totalExecutions = 2, totalClosedTrades = 1. The up-breakouts at i=4 and i=5
+add **zero** executions: no pyramiding, one position.
 
 ### F8 — Flat series never signals (clause 2; donor regression, transfers verbatim)
 
 Ten identical bars `O=H=L=C=10`: every `ch[i−1] = 10/10`, `10 > 10` is always
-false. **Expected:** all-empty result. (The donor's second PR #71 regression;
-valid under both models.)
+false. **Expected:** all-empty result (both totals 0). (The donor's second
+PR #71 regression; valid under both models.)
 
 ### F9 — Insufficient bars (clause 11)
 
 - `N = 0` (empty input): no bars, no evaluation. **Expected:** all-empty
-  result.
+  result (both totals 0).
 - `N = 3, p = 3` (any values): first eligible bar would be `i = 3`, which does
-  not exist. **Expected:** all-empty result — insufficient warm-up is a
-  well-formed no-op, not an error and not a fabricated signal.
+  not exist. **Expected:** all-empty result (both totals 0) — insufficient
+  warm-up is a well-formed no-op, not an error and not a fabricated signal.
 
 ### F10 — Quick reversal: entry fill and exit signal on the same bar (clauses 1, 3, 6)
 
@@ -455,15 +509,17 @@ valid under both models.)
 | 1 | 10 | 10 | 10 | 10 | — | — | warm-up |
 | 2 | 10 | 10 | 10 | 10 | — | — | warm-up |
 | 3 | 10 | 14 | 10 | 13 | 10 / 10 | flat | 14 > 10 → **entry signal** |
-| 4 | 13 | 14 | 8 | 9 | 14 / 10 | long (filled @ open 13, step 1) | step 2: 8 < 10 → **exit signal** |
-| 5 | 9 | 10 | 9 | 10 | — | fill @ open 9 | (final bar) |
+| 4 | 12 | 14 | 8 | 9 | 14 / 10 | long (filled @ open 12, step 1) | step 2: 8 < 10 → **exit signal** |
+| 5 | 8 | 9 | 8 | 9 | 14 / 8 | fill @ open 8 → flat | 9 > 14 false → no signal |
 
-ch[3] = bars 1–3 → 14/10.
+ch[3] = bars 1–3 → 14/10. ch[4] = bars 2–4 → 14/8, consulted at bar 5's
+completion (flat): no signal.
 
-**Expected:** executions = 2 (entry fill i=4 @ 13; exit fill i=5 @ 9);
-closedTrades = 1 (13 → 9); openPosition = null; pendingSignal = null. Pins
-the §4.1 event order: bar 4 first fills the pending entry at its open, then
-its completion evaluates the exit rule under the just-entered position.
+**Expected:** executions = 2 (entry fill i=4 @ 12; exit fill i=5 @ 8);
+closedTrades = 1 (12 → 8); openPosition = null; pendingSignal = null;
+totalExecutions = 2, totalClosedTrades = 1. Pins the §4.1 event order: bar 4
+first fills the pending entry at its open, then its completion evaluates the
+exit rule under the just-entered position.
 
 ### F11 — Both bands breached while flat → entry only (clauses 2, 5, 7)
 
@@ -473,14 +529,35 @@ its completion evaluates the exit rule under the just-entered position.
 | 1 | 10 | 12 | 8 | 10 | — | — | warm-up |
 | 2 | 10 | 12 | 8 | 10 | — | — | warm-up |
 | 3 | 13 | 13 | 7 | 9 | 12 / 8 | flat | entry rule only: 13 > 12 → **entry signal** (7 < 8 not consulted while flat) |
-| 4 | 9 | 10 | 8 | 9 | 13 / 7 | long (filled @ open 9) | 8 < 7 false → hold |
+| 4 | 8 | 10 | 8 | 9 | 13 / 7 | long (filled @ open 8) | 8 < 7 false → hold |
 
 ch[2] = bars 0–2 → 12/8. ch[3] = bars 1–3 → 13/7.
 
-**Expected:** executions = 1 (entry fill i=4 @ 9); closedTrades = 0;
-openPosition = {entrySignalIndex 3, entryFillIndex 4, entryPrice 9};
-pendingSignal = null. Pins §4.2's state-dependence: while flat only the entry
-rule exists, so an outside bar is an entry, not an ambiguity.
+**Expected:** executions = 1 (entry fill i=4 @ 8); closedTrades = 0;
+openPosition = {entrySignalIndex 3, entryFillIndex 4, entryPrice 8};
+pendingSignal = null; totalExecutions = 1, totalClosedTrades = 0. Pins §4.2's
+state-dependence: while flat only the entry rule exists, so an outside bar is
+an entry, not an ambiguity.
+
+### F12 — Final bar fills an exit, then evaluates and signals (clauses 1, 3, 4, 6)
+
+| i | O | H | L | C | ch[i−1] u/l | state at eval | eval → outcome |
+|---|---|---|---|---|---|---|---|
+| 0 | 10 | 10 | 10 | 10 | — | — | warm-up |
+| 1 | 10 | 10 | 10 | 10 | — | — | warm-up |
+| 2 | 10 | 10 | 10 | 10 | — | — | warm-up |
+| 3 | 10 | 12 | 10 | 11 | 10 / 10 | flat | 12 > 10 → **entry signal** |
+| 4 | 12 | 12 | 7 | 8 | 12 / 10 | long (filled @ open 12) | 7 < 10 → **exit signal** |
+| 5 | 9 | 20 | 8 | 19 | 12 / 7 | fill @ open 9 → flat | 20 > 12 → **entry signal**; no bar 6 |
+
+ch[3] = bars 1–3 → 12/10. ch[4] = bars 2–4 → 12/7.
+
+**Expected:** executions = 2 (entry fill i=4 @ 12; exit fill i=5 @ 9);
+closedTrades = 1 (12 → 9); openPosition = null; pendingSignal = {entry,
+signalIndex 5, unfillable}; totalExecutions = 2, totalClosedTrades = 1. Pins
+§4.1's final-bar rule (the final bar evaluates after its own open fill) and
+§4.4's orthogonality (a closed trade in history AND a pending terminal
+signal in the live state, simultaneously).
 
 ---
 
