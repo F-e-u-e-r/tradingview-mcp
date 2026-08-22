@@ -64,6 +64,14 @@ describe('independent contract vectors — derivations in comments, no donor inv
     // (1+2+3)/3=2, (2+3+4)/3=3, (3+4+5)/3=4
     assert.deepEqual(sma([1, 2, 3, 4, 5], 3), [null, null, 2, 3, 4]);
   });
+  it('EMA recurrence depth + fractional values — round-3 pins', () => {
+    // Depth: [2,4,6,10,12] p=3: seed 4; idx3 = 10*.5+4*.5 = 7; idx4 = 12*.5+7*.5 = 9.5.
+    // Kills the "EMA only at i===period, rolling SMA after" mutant (28/3≠9.5)
+    // AND any rounding mutant (9.5 is fractional).
+    assertSeriesClose(ema([2, 4, 6, 10, 12], 3), [null, null, 4, 7, 9.5], 'ema depth');
+    // Single-step fractional: idx3 = 9*.5 + 4*.5 = 6.5 (a Math.round mutant returns 7).
+    assertSeriesClose(ema([2, 4, 6, 9], 3), [null, null, 4, 6.5], 'ema fraction');
+  });
   it('SMA/EMA at p=len produce exactly one value; p=1 is the identity — round-2 boundary pins', () => {
     // p=len: sma([2,4,8],3) → [(2+4+8)/3]=14/3 at the last index only; the EMA
     // is its seed there (same value). A `<= period` sufficiency mutant would
@@ -102,6 +110,20 @@ describe('independent contract vectors — derivations in comments, no donor inv
     // [5,6,5,5]: +1 → 100; −1 → avgG=0,avgL=1 → 0; 0 → avgG=0,avgL=0 → zero-loss branch → 100.
     assertSeriesClose(rsi([5, 6, 5, 5], 1), [null, 100, 0, 100], 'rsi p=1');
   });
+  it('RSI recurrence depth, divisor, and fractional values — round-3 pins', () => {
+    // [10,11,10,11,10] p=2: seed 50; idx3: avgG=(.5+1)/2=.75 avgL=.25 → 75;
+    // idx4: avgG=.375 avgL=.625 → RS=.6 → 37.5. A period+1 divisor mutant
+    // preserves the single-step ratio at idx3 but returns 30 at idx4; a
+    // rounding mutant returns 38.
+    assertSeriesClose(rsi([10, 11, 10, 11, 10], 2), [null, null, 50, 75, 37.5], 'rsi depth');
+    // Single fractional seed value: gains [2,0] avgG=1; losses [0,1] avgL=.5 →
+    // RS=2 → 100-100/3 = 66.666… (a rounding mutant returns 67).
+    assertSeriesClose(rsi([10, 12, 11], 2), [null, null, 200 / 3], 'rsi fraction');
+  });
+  it('RSI/ATR p>len keep full-length all-null output SHAPE — round-3 pin', () => {
+    assert.deepEqual(rsi([1, 2], 3), [null, null]);
+    assert.deepEqual(atr([1, 2], [1, 2], [1, 2], 3), [null, null]);
+  });
   it('RSI: strictly rising series → 100 everywhere after warm-up (zero-loss branch)', () => {
     const closes = Array.from({ length: 20 }, (_, i) => i + 1);
     const r = rsi(closes, 14);
@@ -132,6 +154,17 @@ describe('independent contract vectors — derivations in comments, no donor inv
     // H=L doji (zero range): prevC=10, H=L=12 →
     //   TR = max(0, 2, 2) = 2 — the gap terms, not H-L, carry a zero-range bar.
     assert.deepEqual(atr([10, 12], [10, 12], [10, 12], 1), [null, 2]);
+  });
+  it('ATR second post-seed Wilder step — round-3 depth pin', () => {
+    // bars: C=[10,14,9,10,20], H=[10,15,14,10,20], L=[10,12,8,9,20].
+    // TRs: 5, 6, 1, then TR4 = max(0, |20-10|, |20-10|) = 10.
+    // seed idx2 = 5.5; idx3 = (5.5+1)/2 = 3.25; idx4 = (3.25+10)/2 = 6.625.
+    // A "use trs[i-2] after the first step" mutant ends at 2.125 instead.
+    assertSeriesClose(
+      atr([10, 15, 14, 10, 20], [10, 12, 8, 9, 20], [10, 14, 9, 10, 20], 2),
+      [null, null, 5.5, 3.25, 6.625],
+      'atr depth',
+    );
   });
   it('ATR p=2 hand recurrence: seed=(TR1+TR2)/2, then Wilder', () => {
     // Same bars as above + bar3: H10,L9,C10 with prevC=9 → TR3=max(1,1,0)=1.
@@ -167,6 +200,20 @@ describe('independent contract vectors — derivations in comments, no donor inv
     assert.deepEqual(empty.lower, []);
     assert.deepEqual(empty.middle, []);
   });
+  it('Donchian rolling-window EVICTION, both channels — round-3 pins', () => {
+    // Upper eviction: highs [9,1,2] p=2 — the 9 must LEAVE the window at idx2:
+    // upper = [null, 9, 2]. A cumulative-max mutant returns [null,9,9].
+    const up = donchian([9, 1, 2], [0, 0, 0], 2);
+    assert.deepEqual(up.upper, [null, 9, 2]);
+    assert.deepEqual(up.lower, [null, 0, 0]);
+    assert.deepEqual(up.middle, [null, 4.5, 1]);
+    // Lower eviction (twin of the same blind-spot class): lows [-9,1,2] p=2 —
+    // the -9 must leave: lower = [null, -9, 1].
+    const lo = donchian([10, 10, 10], [-9, 1, 2], 2);
+    assert.deepEqual(lo.upper, [null, 10, 10]);
+    assert.deepEqual(lo.lower, [null, -9, 1]);
+    assert.deepEqual(lo.middle, [null, 0.5, 5.5]);
+  });
   it('Donchian p=2 INCLUDES the current bar (adjudicated pin — do not "fix" into exclusion)', () => {
     // highs [1,2,3,4], lows [0,1,2,3]:
     // idx1: max(1,2)=2 / min(0,1)=0 ; idx2: max(2,3)=3 / min(1,2)=1 ; idx3: 4/2
@@ -190,13 +237,17 @@ describe('edges — approved period delta, warm-up, empty, constant', () => {
   // Infinity added round-2: Math.floor(Infinity) === Infinity, so a
   // floor-equality validator mutant would silently accept it (all-null output).
   const badPeriods = [0, -1, 1.5, '14', NaN, null, Infinity];
+  // The typed-error contract is part of the delta: a bare `throw message`
+  // string would satisfy a regex-only assert.throws (round-3), so assert the
+  // Error shape too.
+  const typedPeriodError = { name: 'Error', message: /positive integer/ };
   it('invalid periods fail closed on every function (approved ADAPT delta)', () => {
     for (const p of badPeriods) {
-      assert.throws(() => sma(closes, p), /positive integer/, `sma(${p})`);
-      assert.throws(() => ema(closes, p), /positive integer/, `ema(${p})`);
-      assert.throws(() => rsi(closes, p), /positive integer/, `rsi(${p})`);
-      assert.throws(() => atr(closes, closes, closes, p), /positive integer/, `atr(${p})`);
-      assert.throws(() => donchian(closes, closes, p), /positive integer/, `donchian(${p})`);
+      assert.throws(() => sma(closes, p), typedPeriodError, `sma(${p})`);
+      assert.throws(() => ema(closes, p), typedPeriodError, `ema(${p})`);
+      assert.throws(() => rsi(closes, p), typedPeriodError, `rsi(${p})`);
+      assert.throws(() => atr(closes, closes, closes, p), typedPeriodError, `atr(${p})`);
+      assert.throws(() => donchian(closes, closes, p), typedPeriodError, `donchian(${p})`);
     }
   });
   it('insufficient history → all-null (donor semantics)', () => {
@@ -222,13 +273,14 @@ describe('edges — approved period delta, warm-up, empty, constant', () => {
     assertClose(a[9], 2, 'atr flat'); // TR = H-L = 2 every bar
   });
   it('mismatched column lengths refuse loudly (donor raised IndexError; silent NaN would be a semantic change)', () => {
-    assert.throws(() => atr([1, 2, 3], [1, 2], [1, 2, 3], 1), /equal lengths/);
-    assert.throws(() => donchian([1, 2, 3], [1, 2], 2), /equal lengths/);
+    const typedLengthError = { name: 'Error', message: /equal lengths/ };
+    assert.throws(() => atr([1, 2, 3], [1, 2], [1, 2, 3], 1), typedLengthError);
+    assert.throws(() => donchian([1, 2, 3], [1, 2], 2), typedLengthError);
     // round-2: the oracle must not be one-shaped — a SHORT closes column and a
     // LONGER column must refuse too (a highs-vs-lows-only or `<`-based
     // validator mutant would accept these).
-    assert.throws(() => atr([10, 12], [9, 11], [10], 1), /equal lengths/);
-    assert.throws(() => donchian([1, 2], [0, 1, 2], 2), /equal lengths/);
+    assert.throws(() => atr([10, 12], [9, 11], [10], 1), typedLengthError);
+    assert.throws(() => donchian([1, 2], [0, 1, 2], 2), typedLengthError);
   });
 });
 
@@ -240,9 +292,11 @@ describe('kernel invariants', () => {
   // invariants ("never fetches anything") without invoking anything.
   const code = src.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
   it('imports nothing and reaches for no capability', () => {
-    assert.ok(!/^\s*import /m.test(code), 'no imports at all');
+    // token-level: `import{x}from'node:fs'` is valid ESM with no space after
+    // the keyword, so a spaced regex is not enough (round-3)
+    assert.ok(!/\bimport\b/.test(code), 'no import token anywhere in code');
     assert.ok(!/require\(/.test(code), 'no require');
-    for (const banned of ['fetch', 'XMLHttpRequest', 'WebSocket', 'process.', 'fs.', 'child_process', 'eval(', 'Function(']) {
+    for (const banned of ['fetch', 'XMLHttpRequest', 'WebSocket', 'process.', 'fs.', 'child_process', 'eval(', 'Function(', 'node:']) {
       assert.ok(!code.includes(banned), `no ${banned}`);
     }
   });
@@ -270,6 +324,7 @@ test('attribution readback: notices file binds donor, SHA, path, MIT, and the ap
     'Copyright (c) 2025 Ahmet Taner Atila',
     'MIT',
     'positive integer',
+    'Mismatched input-column lengths', // BOTH approved deltas must stay recorded (round-3)
   ]) {
     assert.ok(notices.includes(needle), `notices must contain: ${needle}`);
   }
