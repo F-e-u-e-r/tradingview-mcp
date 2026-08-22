@@ -24,8 +24,9 @@ const ALLOWLIST = [
   'chart_set_timeframe',
   'chart_set_visible_range',
   'data_get_ohlcv',
-  // A2 (adjudicated 2026-08-22): deliberate 7→8 expansion — the four A1
-  // indicators over the SAME validated OHLCV source; no new acquisition path.
+  // A2 (adjudicated 2026-08-22): deliberate 7→8 expansion — the A1 indicator
+  // kernel (sma/ema/rsi/atr/donchian) over the SAME validated OHLCV source;
+  // no new acquisition path.
   'data_compute_indicator',
   'capture_screenshot',
 ].sort();

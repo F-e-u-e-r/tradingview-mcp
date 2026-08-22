@@ -22,7 +22,12 @@ import * as core from '../core/analytics.js';
  * never changes the acquisition window). Values are raw doubles: A2 is a
  * transparent transport of the A1 kernel, with no rounding layer.
  */
-export function registerAnalyticsTools(server) {
+// _deps follows the repo's standard injection seam one layer up: tests hand a
+// stubbed getOhlcv THROUGH the real registered handler so the full MCP seam
+// (SDK validation -> handler destructuring -> core -> jsonResult) is the
+// tested path; production (server.js) passes nothing and gets the real
+// core/data acquisition. The seam carries no capability of its own.
+export function registerAnalyticsTools(server, _deps) {
   server.registerTool('data_compute_indicator', {
     description: 'Compute one technical indicator (sma | ema | rsi | atr | donchian) over the SAME validated OHLCV bars data_get_ohlcv serves. TWO MODES, inherited unchanged: pass from+to (unix seconds) to compute over THAT historical window, or omit both for the newest `count` bars. `period` is REQUIRED (positive integer, e.g. 14). Omit `last` for the full aligned series; pass last=N to return only the final N points, computed AFTER the full-window calculation. Leading nulls are documented warm-up (not an error); donchian returns upper/middle/lower channels; values are raw doubles with no rounding.',
     inputSchema: z.strictObject({
@@ -34,7 +39,7 @@ export function registerAnalyticsTools(server) {
       last: z.number().int().min(1).optional().describe('Optional output tail: return only the final N points AFTER the full-window computation. Omit for the entire series.'),
     }),
   }, async ({ indicator, period, count, from, to, last }) => {
-    try { return jsonResult(await core.getIndicator({ indicator, period, count, from, to, last })); }
+    try { return jsonResult(await core.getIndicator({ indicator, period, count, from, to, last, _deps })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 }

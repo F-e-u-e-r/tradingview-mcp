@@ -106,6 +106,15 @@ describe('core — acquisition passthrough and transparent transport', () => {
     assert.equal(calls.length, 1);
     assert.deepEqual(calls[0], { summary: false, count: 3, from: 100, to: 200 });
   });
+  it('one-sided from/to is FORWARDED, never collapsed — pair validation stays the data layer\'s (round-1)', async () => {
+    // A both-or-nothing collapse mutant would silently turn a from-only call
+    // into latest mode instead of letting getOhlcv refuse the half-window.
+    const { calls, getOhlcv } = stubOhlcv([bar(1, 10), bar(2, 11)]);
+    await getIndicator({ indicator: 'sma', period: 1, from: 100, _deps: { getOhlcv } });
+    assert.deepEqual(calls[0], { summary: false, count: undefined, from: 100, to: undefined });
+    await getIndicator({ indicator: 'sma', period: 1, to: 200, _deps: { getOhlcv } });
+    assert.deepEqual(calls[1], { summary: false, count: undefined, from: undefined, to: 200 });
+  });
   it('getOhlcv refusals propagate unchanged (the data layer keeps the temporal contract)', async () => {
     const getOhlcv = async () => { throw new Error('No loaded bars fall within [1, 2] — sentinel'); };
     await assert.rejects(
@@ -195,6 +204,61 @@ describe('core — acquisition passthrough and transparent transport', () => {
   });
 });
 
+// ── the full MCP seam: SUCCESSFUL calls through the SDK ─────────────────────
+// (round-1: without this, a handler-level mutant — a `last = 50` destructure
+// default, handler-side rounding, a reshaped response — survived every test.)
+
+describe('served seam — successful calls through the registered handler', () => {
+  let sClient; let sServer; let sCalls;
+  before(async () => {
+    sServer = new McpServer({ name: 'a2-served-test', version: '0.0.0' });
+    const bars = Array.from({ length: 60 }, (_, i) => bar(i + 1, 100 + i));
+    sCalls = [];
+    const getOhlcv = async (args) => { sCalls.push(args); return { success: true, bar_count: bars.length, total_available: 999, source: 'direct_bars', mode: 'latest', bars }; };
+    registerAnalyticsTools(sServer, { getOhlcv });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    sClient = new Client({ name: 'a2-served-client', version: '0.0.0' });
+    await Promise.all([sServer.connect(st), sClient.connect(ct)]);
+  });
+  after(async () => { await sClient.close(); await sServer.close(); });
+
+  async function callOk(args) {
+    const res = await sClient.callTool({ name: 'data_compute_indicator', arguments: args });
+    assert.ok(!res.isError, `expected success, got: ${res.content?.[0]?.text?.slice(0, 200)}`);
+    return JSON.parse(res.content[0].text);
+  }
+
+  it('omitted last returns the FULL series through the served seam (no hidden handler default)', async () => {
+    const r = await callOk({ indicator: 'sma', period: 8 });
+    assert.equal(r.metadata.returned, 60);
+    assert.equal(r.metadata.truncated, false);
+    assert.equal(r.times.length, 60);
+  });
+  it('served values are raw doubles and aligned; metadata is the pre-truncation truth', async () => {
+    const r = await callOk({ indicator: 'rsi', period: 2, last: 3 });
+    assert.equal(r.metadata.total, 60);
+    assert.equal(r.metadata.returned, 3);
+    assert.equal(r.metadata.truncated, true);
+    assert.equal(r.metadata.warmup_nulls_total, 2);
+    assert.equal(r.times.length, 3);
+    assert.equal(r.series.value.length, 3);
+    // strictly rising closes → RSI 100 exactly at the tail (no rounding artifacts)
+    assert.ok(r.series.value.every((v) => v === 100));
+  });
+  it('donchian three-channel shape survives the served seam intact', async () => {
+    const r = await callOk({ indicator: 'donchian', period: 20, last: 2 });
+    assert.deepEqual(Object.keys(r.series).sort(), ['lower', 'middle', 'upper']);
+    assert.equal(r.series.upper.length, 2);
+    assert.equal(r.series.middle.length, 2);
+    assert.equal(r.series.lower.length, 2);
+  });
+  it('the handler forwards caller args verbatim into acquisition (spot check)', async () => {
+    sCalls.length = 0;
+    await callOk({ indicator: 'sma', period: 3, count: 42 });
+    assert.deepEqual(sCalls[0], { summary: false, count: 42, from: undefined, to: undefined });
+  });
+});
+
 // ── static invariants ───────────────────────────────────────────────────────
 
 describe('A2 invariants', () => {
@@ -205,6 +269,15 @@ describe('A2 invariants', () => {
     assert.deepEqual(imports, ['../analytics/indicators.js', './data.js']);
     for (const banned of ['connection', 'evaluate', 'fetch', 'WebSocket', 'CDP']) {
       assert.ok(!code.includes(banned), `core/analytics must not reference ${banned}`);
+    }
+  });
+  it('tools/analytics owns no acquisition either: only zod, format, temporal, and core/analytics', () => {
+    const src = readFileSync(join(here, '../src/tools/analytics.js'), 'utf8');
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+    const imports = [...code.matchAll(/from '([^']+)'/g)].map((m) => m[1]).sort();
+    assert.deepEqual(imports, ['../core/analytics.js', './_format.js', './_temporal.js', 'zod']);
+    for (const banned of ['connection', 'evaluate(', 'fetch', 'XMLHttpRequest', 'WebSocket', 'CDP', 'http://', 'ws://']) {
+      assert.ok(!code.includes(banned), `tools/analytics must not reference ${banned}`);
     }
   });
   it('the A1 kernel file is byte-identical to its A1-closed state (A2 changes nothing numerical)', () => {
