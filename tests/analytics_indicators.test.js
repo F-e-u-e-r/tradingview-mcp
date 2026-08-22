@@ -300,7 +300,11 @@ describe('kernel invariants', () => {
       assert.ok(!code.includes(banned), `no ${banned}`);
     }
   });
-  it('no MCP/product surface imports the kernel yet (A1: no exposure)', () => {
+  it('kernel wiring is EXACTLY the sanctioned A2 surface (updated from the A1 no-exposure pin)', () => {
+    // A1 shipped with zero product wiring; A2 (owner-adjudicated) exposes the
+    // kernel through precisely one path: server.js -> tools/analytics.js ->
+    // core/analytics.js. Nothing else may touch it.
+    const allowed = new Set(['../src/server.js', '../src/tools/analytics.js', '../src/core/analytics.js']);
     const roots = ['../src/server.js', '../src/connection.js', '../src/wait.js'];
     for (const f of readdirSync(join(here, '../src/tools'))) roots.push(`../src/tools/${f}`);
     for (const f of readdirSync(join(here, '../src/core'))) {
@@ -308,8 +312,10 @@ describe('kernel invariants', () => {
     }
     for (const rel of roots) {
       const text = readFileSync(join(here, rel), 'utf8');
-      assert.ok(!text.includes('analytics'), `${rel} must not wire the kernel in A1`);
+      if (allowed.has(rel)) continue;
+      assert.ok(!text.includes('analytics'), `${rel} must not wire the kernel outside the sanctioned A2 path`);
     }
+    assert.ok(readFileSync(join(here, '../src/server.js'), 'utf8').includes('registerAnalyticsTools'), 'the sanctioned wiring itself must exist');
   });
 });
 

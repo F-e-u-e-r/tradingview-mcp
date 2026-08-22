@@ -1,7 +1,7 @@
 /**
  * Tool-surface gate for the review build.
  *
- * The server must expose EXACTLY the 7 allowlisted tools — and none of the
+ * The server must expose EXACTLY the 8 allowlisted tools — and none of the
  * denylisted capabilities. `draw_shape`/`draw_clear` are on the DENYLIST, not
  * merely absent from the allowlist: this release removed them because their
  * clear path cannot prove session ownership, and re-registering them must fail
@@ -24,6 +24,10 @@ const ALLOWLIST = [
   'chart_set_timeframe',
   'chart_set_visible_range',
   'data_get_ohlcv',
+  // A2 (adjudicated 2026-08-22): deliberate 7→8 expansion — the A1 indicator
+  // kernel (sma/ema/rsi/atr/donchian) over the SAME validated OHLCV source;
+  // no new acquisition path.
+  'data_compute_indicator',
   'capture_screenshot',
 ].sort();
 
@@ -111,7 +115,7 @@ describe('tool surface (allowlist + denylist gate)', () => {
     if (child) child.kill();
   });
 
-  it('exposes exactly the 7 allowlisted tools', () => {
+  it('exposes exactly the 8 allowlisted tools', () => {
     assert.deepEqual(tools.map(t => t.name).sort(), ALLOWLIST);
   });
 
