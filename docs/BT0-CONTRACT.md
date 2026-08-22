@@ -261,8 +261,9 @@ occur. When the eligible interval is non-empty, a signal on the final bar
 `i = N−1` is terminal-unfillable. Worked example at the ceiling — `p = 20`,
 `N = 500`: eligible evaluation bars `i ∈ [20, 499]` (480 bars), fillable
 signal bars `i ∈ [20, 498]` (479 bars), and a bar-499 signal is terminal.
-An N-bar window loses exactly `p` head bars to warm-up and the tail bar's
-signal to unfillability.
+For `N ≥ p+1`, an N-bar window loses exactly `p` head bars to warm-up and the
+tail bar's signal, if one forms there, to unfillability; for `N ≤ p`, all `N`
+bars are warm-up and no evaluation occurs at all (F9).
 
 ---
 
@@ -341,9 +342,12 @@ bars ending at `i−1`. Every number is chosen to be recomputable on paper.
 "eval" is the rule actually evaluated per §4.2 (flat → entry only;
 positioned → exit only; warm-up → none).
 
-Discrimination property (deliberate): in every fixture with a fill, the fill
-price differs from the signal bar's close, so a same-bar-close-fill
-implementation fails these fixtures on price as well as on fill index.
+Discrimination property (deliberate): every **BT V1 expected** fill price
+differs from its signal bar's close, so a same-bar-close-fill implementation
+fails these fixtures on price as well as on fill index. (The one intentional
+exception to the pattern is F6's *donor comparator row*, which is not a V1
+expected fill: the donor model fills at the signal bar's close by definition
+— that contrast is the point of F6.)
 
 ### F1 — Complete round trip (clauses 1, 2, 3, 6)
 
