@@ -100,9 +100,11 @@ statement about those milestones appear in this document, and only these:
 
 - the declared V1 assumption set (§4.6), which the BT1 simulation model holds
   constant; and
-- owner-adjudicated cross-milestone rulings of 2026-08-22, recorded in §4.6
-  and §5 (cost-parameter explicitness, allowlist-gate discipline, tentative
-  naming family, denylist distinction, output honesty).
+- owner-adjudicated cross-milestone rulings, recorded and labeled in place in
+  §4.6, §4.7 and §5 (cost-parameter explicitness, the completion policy,
+  allowlist-gate discipline, tentative naming family, denylist distinction,
+  output honesty) — each ruling carries its provenance where it is stated,
+  and ratification of this document adopts them all.
 
 Those record standing adjudications that bind the later milestones'
 **acceptance**; each milestone's design space remains open within them.
@@ -121,7 +123,10 @@ Nothing else in this document pre-locks a later milestone.
   Indexing is **0-based**; `N` = bar count; `p` = Donchian period.
 - **Completed bar.** Bar `i` is *completed* when its OHLC values are final. All
   signal evaluation for bar `i` happens at completion of bar `i`, using only
-  bars `0..i`.
+  bars `0..i`. The engine is a pure function of its input array and treats
+  every supplied bar as completed; *establishing* completion is the
+  acquisition boundary's obligation (§4.7, completion policy). Fixture bar
+  tables (§7) are therefore completed bars by definition.
 - **Prior-window channel `ch[i−1]`.** The A1 kernel's `donchian(highs, lows,
   p)` value at index `i−1`: upper = max high, lower = min low over the `p` bars
   ending at **`i−1`** (bar-inclusive at `i−1`, per the A1-closed definition).
@@ -137,6 +142,10 @@ Nothing else in this document pre-locks a later milestone.
 ## 4. Normative execution model
 
 ### 4.1 Event ordering (per bar `t`, after warm-up)
+
+**Initial state (binding).** The simulation starts flat: `position = null`,
+no pending order, empty `executions` and `closedTrades`. No position, order,
+or signal carries in from outside the supplied bars.
 
 1. **At the open of bar `t`:** if an order is pending from the signal formed at
    completion of bar `t−1`, it fills at `open[t]`. Position state changes at
@@ -247,6 +256,21 @@ BT V1 computes **only** over what the validated OHLCV boundary already serves:
 - the existing two explicit modes (latest-`count` / `from`+`to` window) and
   fail-closed semantics stand, unchanged.
 
+**Completion policy (binding; added in review round 3, ratified with this
+document).** The served records carry no completion flag, and the newest bar
+the source serves — latest mode especially — may still be *forming* (its
+OHLC not yet final; measured at `src/core/data.js`, which maps the chart's
+bars as-is). Clause 1 permits signals only from completed bars, so a forming
+bar must never be evaluated: a newest served bar whose completion the
+acquisition layer cannot establish is **excluded from the engine's input**
+(a deterministic drop of the final element) before the engine runs. The
+engine then executes §4 over the remaining bars unchanged — in particular, a
+signal on the new final bar is terminal-unfillable per §4.3/§4.4, and no
+fill is taken on an excluded bar. Any served result must make the exclusion
+(or the method that established completion) visible, never silent (§5,
+output honesty); the concrete mechanism is BT5's to implement inside this
+rule.
+
 BT V1 is therefore *"backtest over the validated OHLCV currently available to
 this MCP"*, not a long-history research engine. Long-history/paging would be a
 separate data-capability workstream with its own adjudication; it must not be
@@ -295,7 +319,8 @@ affected milestones implement them as acceptance conditions.
   computation over already-validated data. The exposure tool is therefore
   tentatively **`data_compute_backtest`** (not `data_backtest_strategy`).
 - **Output honesty (locks at BT5).** A served backtest result must carry its
-  assumptions (execution model, cost model, coverage/provenance) — a
+  assumptions (execution model, cost model, coverage/provenance — including
+  any completion-based exclusion of the newest served bar, §4.7) — a
   simulation must not be presentable as live-performance prediction.
 
 ---
