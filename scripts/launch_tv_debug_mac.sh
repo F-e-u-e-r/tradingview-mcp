@@ -169,7 +169,8 @@ tv_bundle_pids() {
 
 # Main processes of ANY TradingView install OTHER than the resolved one:
 # comm ends with the bundle-relative main path but is not "$APP".
-# OBSERVATION ONLY — the result is printed and aborted on, never signalled.
+# OBSERVATION ONLY — the result is reported as a warning, never adjudicated,
+# never signalled (owner ruling 2026-08-22).
 # Returns non-zero if the process table cannot be read.
 tv_foreign_mains() {
   local table
