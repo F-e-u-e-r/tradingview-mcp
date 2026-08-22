@@ -152,13 +152,17 @@ export async function waitForChartReady(expectedSymbol = null, expectedTf = null
     // for one ticker be satisfied by a different one that contains it. The
     // matcher accepts exactly the measured canonical aliases and nothing
     // broader — see symbolMatches/resolutionMatches above (issue #5).
-    if (expectedSymbol && !symbolMatches(expectedSymbol, state.symbol)) {
+    // Presence is null/undefined-omitted, never truthiness: an empty-string
+    // expectation is a REAL (never-satisfiable) expectation and must fail the
+    // match rather than silently skip verification (cross-model round 2;
+    // matches the adjudicated presence semantics from issue #3).
+    if (expectedSymbol != null && !symbolMatches(expectedSymbol, state.symbol)) {
       stableCount = 0;
       await new Promise(r => setTimeout(r, POLL_INTERVAL));
       continue;
     }
     // The resolution was passed in and must actually be verified (C5).
-    if (expectedTf && !resolutionMatches(expectedTf, state.resolution)) {
+    if (expectedTf != null && !resolutionMatches(expectedTf, state.resolution)) {
       stableCount = 0;
       await new Promise(r => setTimeout(r, POLL_INTERVAL));
       continue;

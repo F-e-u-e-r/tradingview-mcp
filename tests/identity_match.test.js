@@ -132,3 +132,17 @@ test('waitForChartReady: a different ticker is still NOT ready for a bare reques
   const ready = await waitForChartReady('AAPL', null, 300, readyEvaluateFor({ symbol: 'BATS:MSFT', resolution: '120' }));
   assert.equal(ready, false);
 });
+
+test('waitForChartReady: an empty-string expectation is a real expectation, never a silent skip', async () => {
+  // Presence is null/undefined-omitted: '' must reach the matcher (and fail),
+  // not bypass identity verification via truthiness.
+  const sym = await waitForChartReady('', null, 300, readyEvaluateFor({ symbol: 'BATS:MSFT', resolution: '120' }));
+  assert.equal(sym, false);
+  const tf = await waitForChartReady(null, '', 300, readyEvaluateFor({ symbol: 'BATS:MSFT', resolution: '120' }));
+  assert.equal(tf, false);
+});
+
+test('waitForChartReady: null/omitted expectations still skip identity checks', async () => {
+  const ready = await waitForChartReady(null, null, 2000, readyEvaluateFor({ symbol: 'BATS:MSFT', resolution: '120' }));
+  assert.equal(ready, true);
+});
