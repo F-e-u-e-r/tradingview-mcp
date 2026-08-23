@@ -287,6 +287,18 @@ describe('served seam — successful calls through the registered handler', () =
     await callOk({ indicator: 'sma', period: 3, count: 42 });
     assert.deepEqual(sCalls[0], { summary: false, count: 42, from: undefined, to: undefined, includeResolution: true });
   });
+  it('the served handler forwards a HISTORICAL window into acquisition — from/to survive the destructure (r2 Sol F9)', async () => {
+    // The core-level forwarding test cannot see a handler that drops
+    // from/to before calling core; this drives the windowed shape through
+    // the SDK and asserts the acquisition args.
+    sCalls.length = 0;
+    await callOk({ indicator: 'vwap', from: 100, to: 200 });
+    assert.deepEqual(sCalls[0], { summary: false, count: undefined, from: 100, to: 200, includeResolution: true });
+  });
+  it('served non-vwap responses do NOT carry the vwap-only field — the handler must not synthesize it (r2 Sol F10)', async () => {
+    const r = await callOk({ indicator: 'sma', period: 8 });
+    assert.equal('zero_volume_nulls_total' in r.metadata, false, 'zero_volume_nulls_total synthesized at the served seam');
+  });
   it('served vwap: window-anchored values, vwap-only metadata, and NO period field', async () => {
     // 60 equal-volume bars, closes 100..159 with symmetric spread → hlc3 =
     // close exactly, so vwap[i] = mean(100..100+i) = 100 + i/2 — dyadic-exact.

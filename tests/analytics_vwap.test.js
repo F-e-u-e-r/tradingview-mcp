@@ -111,6 +111,53 @@ describe('vwap kernel — window-relative Σ(hlc3×volume)/Σ(volume)', () => {
       );
     }
   });
+  it('an invalid volume refuses even BEFORE any cumulative volume exists (r2 Luna F2)', () => {
+    // The per-bar validation must not be gated behind cumVolume > 0: a
+    // negative FIRST bar and a negative bar after a zero-volume prefix
+    // both refuse.
+    assert.throws(() => vwap([10], [10], [10], [-1]), { message: /vwap: volume must be a non-negative number/ });
+    assert.throws(() => vwap(...cols([vbar(1, 10, 0), vbar(2, 20, -1)])), { message: /vwap: volume must be a non-negative number/ });
+  });
+  it('a positive volume whose contribution underflows to zero is refused — never silently misweighted (r2 Luna F1)', () => {
+    // Reproduction of the confirmed defect: volume Number.MIN_VALUE at
+    // hlc3 0.5 → contribution rounds to exactly 0 while cumVolume > 0,
+    // so the pre-fix kernel returned [0] where the contract requires the
+    // first bar to equal its hlc3 (a silently wrong VALUE, the class the
+    // issue explicitly bans).
+    assert.throws(
+      () => vwap([0.5], [0.5], [0.5], [Number.MIN_VALUE]),
+      { message: /vwap: contribution underflowed to zero/ },
+    );
+    // Positive control: a tiny volume whose contribution SURVIVES stays
+    // exact — 0.5 × 1e-300 = 5e-301 ≠ 0, and 5e-301 / 1e-300 = 0.5.
+    assert.deepEqual(vwap([0.5], [0.5], [0.5], [1e-300]), [0.5]);
+  });
+  it('a cumulative sum that overflows to Infinity is refused — never a silent JSON null (r2 Sol F1)', () => {
+    // Reproduction of the confirmed defect: hlc3 2 × volume MAX_VALUE
+    // overflows the weighted sum; the pre-fix kernel returned [Infinity],
+    // which serializes as JSON null while zero_volume_nulls_total stays 0.
+    assert.throws(
+      () => vwap([2], [2], [2], [Number.MAX_VALUE]),
+      { message: /vwap: cumulative sums are no longer finite/ },
+    );
+    // The sum can also overflow across bars whose individual
+    // contributions are finite: hlc3 5e307 × volume 2 = 1e308 per bar,
+    // and 1e308 + 1e308 → Infinity at index 1. (hlc3 itself must stay
+    // representable: (x+x+x) overflows first for x ≥ MAX/3.)
+    assert.throws(
+      () => vwap(...cols([vbar(1, 5e307, 2), vbar(2, 5e307, 2)])),
+      { message: /vwap: cumulative sums are no longer finite/ },
+    );
+    // Positive control: one huge-but-finite bar computes exactly.
+    assert.deepEqual(vwap(...cols([vbar(1, 1e307, 1)])), [1e307]);
+  });
+  it('a one-bar all-zero-volume window is the same typed error as the multi-bar case (r2 Sol F2)', () => {
+    assert.throws(() => vwap([10], [10], [10], [0]), { message: /vwap: cumulative volume is zero across the entire window/ });
+  });
+  it('hlc3 itself is the RAW (high+low+close)/3 — a non-integer hlc3 is pinned by its written expression (r2 Sol F3)', () => {
+    // (10+10+11)/3 is not an integer; a Math.round(hlc3) mutant returns 10.
+    assert.equal(vwap([10], [10], [11], [1])[0], (10 + 10 + 11) / 3);
+  });
   it('negative zero volume is a legal zero contribution, not a refusal', () => {
     assert.deepEqual(vwap(...cols([vbar(1, 10, -0), vbar(2, 40, 4)])), [null, 40]);
   });
@@ -181,7 +228,9 @@ describe('core — vwap through getIndicator', () => {
   });
   it('non-"1" authoritative resolution is refused BEFORE the kernel — naming required and actual', async () => {
     const bars = [vbar(1, 10, 1), vbar(2, 20, 1)]; // fully computable — only the gate can refuse
-    for (const actual of ['5', '60', '1D', '1m', '01', 1]) {
+    // ' 1 ' / '1 ' pin EXACT-string comparison against a whitespace-
+    // normalizing (trim) mutant (r2 Sol F8).
+    for (const actual of ['5', '60', '1D', '1m', '01', 1, ' 1 ', '1 ']) {
       const { calls, getOhlcv } = stubOhlcv(bars, { resolution: actual });
       await assert.rejects(
         () => getIndicator({ indicator: 'vwap', _deps: { getOhlcv } }),
@@ -258,6 +307,13 @@ describe('core — vwap through getIndicator', () => {
       { message: /cumulative volume is zero/ },
     );
   });
+  it('a sum-overflow refusal propagates through core — never a served null claiming zero nulls (r2 Sol F1)', async () => {
+    const { getOhlcv } = stubOhlcv([vbar(1, 2, Number.MAX_VALUE)], oneMinute);
+    await assert.rejects(
+      () => getIndicator({ indicator: 'vwap', _deps: { getOhlcv } }),
+      { message: /cumulative sums are no longer finite/ },
+    );
+  });
   it('non-vwap indicators neither require nor read the resolution envelope, and gain no vwap metadata — ALL five (r1 Sol F8)', async () => {
     // The vwap-only field must not leak onto ANY other indicator (a mutant
     // widening the condition to one more indicator survives an SMA-only
@@ -331,6 +387,12 @@ describe('data — same-snapshot resolution stays out of the public shape', () =
     const raw = await getOhlcv({ summary: false, includeResolution: true, _deps: { evaluate: page(undefined) } });
     assert.equal(raw.resolution, null);
   });
+  it('a FALSY established resolution (numeric 0) is transported verbatim — the assembly must use ??, not || (r2 Sol F5)', async () => {
+    const raw = await getOhlcv({ summary: false, includeResolution: true, _deps: { evaluate: page(0) } });
+    assert.equal(raw.resolution, 0, 'non-summary assembly collapsed a falsy authoritative value');
+    const summary = await getOhlcv({ summary: true, includeResolution: true, _deps: { evaluate: page(0) } });
+    assert.equal(summary.resolution, 0, 'summary assembly collapsed a falsy authoritative value');
+  });
   it('resolution rides the SAME evaluation as the bars — exactly one evaluate, first snapshot wins (r1 Luna F2)', async () => {
     // A second evaluate for the resolution could race a timeframe switch
     // between the two reads — the exact hazard the owner's D2 amendment
@@ -391,6 +453,36 @@ describe('data — same-snapshot resolution stays out of the public shape', () =
     assert.deepEqual(r.series.value, [10]);
     assert.equal(r.metadata.zero_volume_nulls_total, 0);
   });
+  it('the snippet transports alias STRINGS verbatim — "1m" reaches the gate as "1m" and is refused (r2 Sol F6)', async () => {
+    // An in-snippet normalization ("1m" → "1") would be invisible to the
+    // object-stub alias tests; the real-snippet fixture pins verbatim
+    // transport so the gate is the ONLY comparator.
+    const chained = (args) => getOhlcv({ ...args, _deps: { evaluate: snippetPage('1m') } });
+    await assert.rejects(
+      () => getIndicator({ indicator: 'vwap', _deps: { getOhlcv: chained } }),
+      { message: /exactly "1", got: "1m"/ },
+    );
+  });
+  it('a resolution() that RETURNS undefined stays unestablished at the snippet — no fail-open default (r2 Sol F7)', async () => {
+    // Distinct from the THROWING getter below: a successful call returning
+    // undefined must also end as null; a mutant defaulting it to "1" would
+    // compute here.
+    const chained = (args) => getOhlcv({ ...args, _deps: { evaluate: snippetPage(undefined) } });
+    await assert.rejects(
+      () => getIndicator({ indicator: 'vwap', _deps: { getOhlcv: chained } }),
+      { message: /exactly "1", got: null/ },
+    );
+  });
+  it('a non-string/non-number resolution is FILTERED to null by the snippet — boolean true refused as unestablished (r2 Luna F3)', async () => {
+    // The envelope's documented type filter (string | number verbatim,
+    // else null) is discriminated here: a widened filter would transport
+    // `true` and the refusal would name `true` instead of null.
+    const chained = (args) => getOhlcv({ ...args, _deps: { evaluate: snippetPage(true) } });
+    await assert.rejects(
+      () => getIndicator({ indicator: 'vwap', _deps: { getOhlcv: chained } }),
+      { message: /exactly "1", got: null/ },
+    );
+  });
   it('a THROWING chart.resolution() fails CLOSED at the snippet layer — refused as null, never fail-open (r1 Sol F3)', async () => {
     // The snippet's try/catch must leave resolution null when the page API
     // throws; a fail-open default (e.g. initializing to "1") would compute
@@ -410,8 +502,11 @@ describe('vwap module invariants', () => {
   it('src/analytics/vwap.js imports NOTHING and owns no capability — adjacent to A1, never an amendment of it', () => {
     const src = readFileSync(join(here, '../src/analytics/vwap.js'), 'utf8');
     const code = src.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
-    assert.deepEqual([...code.matchAll(/from '([^']+)'/g)].map((m) => m[1]), [], 'the vwap kernel is standalone — zero imports');
-    for (const banned of ['require(', 'import(', 'connection', 'evaluate', 'fetch', 'XMLHttpRequest', 'WebSocket', 'CDP', 'process.', 'Date.now', 'Math.random']) {
+    // Zero imports means NO import syntax of any form — a bare side-effect
+    // `import 'node:fs'` has no `from` clause, so scan for the keyword
+    // itself, not just the from-form (r2 Luna F4).
+    assert.ok(!/\bimport\b/.test(code), 'the vwap kernel is standalone — zero imports of ANY form');
+    for (const banned of ['require(', 'connection', 'evaluate', 'fetch', 'XMLHttpRequest', 'WebSocket', 'CDP', 'process.', 'Date.now', 'Math.random', 'node:']) {
       assert.ok(!code.includes(banned), `vwap kernel must not reference ${banned}`);
     }
   });

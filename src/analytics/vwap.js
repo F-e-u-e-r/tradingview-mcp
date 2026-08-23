@@ -29,10 +29,15 @@
  *
  * Values are RAW doubles evaluated in the written order (the A2
  * transparent-transport rule); like the A1 kernels this module adds no
- * overflow/finiteness guards on prices — the owner's 2026-08-23
- * disposition records that policy as outside issue #16's bounded edge
- * contract (BT2's guard doctrine is accounting-specific, not an
- * indicator-kernel rule).
+ * GENERAL overflow/finiteness policy on prices — the owner's 2026-08-23
+ * disposition records that as outside issue #16's bounded edge contract
+ * (BT2's guard doctrine is accounting-specific, not an indicator-kernel
+ * rule). Exactly TWO narrow guards exist, each admitted under that
+ * disposition's carve-out by executable proof of a binding output-
+ * invariant violation: the contribution-dropout guard (underflow to 0
+ * silently misweights — r2 Luna F1) and the cumulative-sum finiteness
+ * guard (overflow to Infinity serializes as JSON null while the null
+ * count claims zero — r2 Sol F1). Nothing else is guarded.
  *
  * DEFERRED (owner ruling D3 — recorded as binding on future work, not
  * implemented here): higher-timeframe VWAP, if later added, MUST aggregate
@@ -71,8 +76,28 @@ export function vwap(highs, lows, closes, volumes) {
       throw new Error(`vwap: volume must be a non-negative number, got: ${volume} (index ${i})`);
     }
     const hlc3 = (highs[i] + lows[i] + closes[i]) / 3;
-    cumWeighted += hlc3 * volume;
+    const contribution = hlc3 * volume;
+    // Narrow dropout guard (r2 Luna F1, admitted under the owner's
+    // overflow disposition by executable proof): a positive volume whose
+    // contribution UNDERFLOWS to exactly zero would silently drop this
+    // bar's weight while still counting its volume — e.g. volume
+    // Number.MIN_VALUE at hlc3 0.5 returned 0 where the contract requires
+    // the first bar to equal its hlc3. Fail loud instead of misweighting.
+    // This is that demonstrated class only — no general overflow policy.
+    if (volume > 0 && hlc3 !== 0 && contribution === 0) {
+      throw new Error(`vwap: contribution underflowed to zero (hlc3 ${hlc3} × volume ${volume}, index ${i}) — accumulating it would silently drop this bar's weight`);
+    }
+    cumWeighted += contribution;
     cumVolume += volume;
+    // Overflow twin of the dropout guard above (r2 Sol F1, same
+    // admission): 2 × Number.MAX_VALUE overflows the weighted sum to
+    // Infinity, the emitted value serializes to JSON null, and the
+    // response would still claim zero_volume_nulls_total: 0 — a silently
+    // ABSENT value this time. Fail loud the moment a cumulative sum
+    // leaves the representable range.
+    if (!Number.isFinite(cumWeighted) || !Number.isFinite(cumVolume)) {
+      throw new Error(`vwap: cumulative sums are no longer finite (Σweighted ${cumWeighted}, Σvolume ${cumVolume}, index ${i}) — the average cannot be represented faithfully`);
+    }
     if (cumVolume > 0) result[i] = cumWeighted / cumVolume;
   }
   if (closes.length > 0 && cumVolume === 0) {
