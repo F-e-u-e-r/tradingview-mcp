@@ -71,8 +71,12 @@ function requireStrictlyIncreasingTimes(name, times) {
  * Returns { buckets, partialLeading, incompleteTerminal }: `buckets` holds
  * the COMPLETED buckets only, ascending, as
  * { start, startIndex, endIndex } (inclusive index range into `times`);
- * the exclusion counts are 1m bars dropped at each edge (a single present
- * bucket counts as terminal, never double-counted as leading).
+ * the boundary counts are 1m bars sitting in the partial leading /
+ * incomplete terminal buckets (a single present bucket counts as
+ * terminal, never double-counted as leading). They describe INPUT
+ * boundary state, not participation — the consumers differ (module
+ * header): neither set enters derived 5m bars, but partial leading bars
+ * stay in the 5m VWAP fold.
  */
 export function partitionFiveMinuteBuckets(times) {
   requireStrictlyIncreasingTimes('partitionFiveMinuteBuckets', times);

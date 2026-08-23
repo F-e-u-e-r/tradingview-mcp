@@ -107,6 +107,15 @@ describe('boundary — strictness and presence/type semantics', () => {
       assert.ok(parseArgs({ indicator, period: 14 }).success, `${indicator} must stay schema-accepted`);
       assert.ok(parseArgs({ indicator, period: 1 }).success, `${indicator} with the minimum period 1 must stay schema-accepted`);
     }
+    // B+ served-metadata consistency (Sol B+ finding 1): the TOP-LEVEL
+    // description must not assert "completed 1-minute" — the owner
+    // precision forbids any terminal-1m completion claim, and the field
+    // description says so; the two must never contradict.
+    let served;
+    registerAnalyticsTools({ registerTool: (name, config) => { if (name === 'data_compute_indicator') served = config; } });
+    assert.doesNotMatch(served.description, /completed 1-minute/, 'the top-level description must not claim completed 1-minute analytics');
+    assert.match(served.inputSchema.shape.timeframe.description, /does NOT independently assert the terminal 1-minute bar is completed/);
+    assert.match(served.description, /completed five-minute|COMPLETED five-minute/, 'the completed claim belongs to the 5-minute side only');
     // B+ amendment: `timeframe` is an optional claim, enum-curated.
     assert.ok(parseArgs({ indicator: 'sma', period: 2, timeframe: '5' }).success);
     assert.ok(parseArgs({ indicator: 'vwap', timeframe: '1' }).success);
