@@ -58,6 +58,13 @@ const IC = 'insufficient_closed_trades';
 const ND = 'no_directional_closed_trades';
 const NL = 'no_losses';
 
+// A thrown value satisfies the contract's "typed error" only as a real
+// Error carrying the module's typed prefix — a bare regex would also
+// accept thrown strings or foreign objects (round-1 Sol RECORD).
+const typedError = (pattern) => (err) => err instanceof Error
+  && err.message.startsWith('computeBacktestMetrics: ')
+  && pattern.test(err.message);
+
 // The ratified execution fixtures the metrics layer projects over
 // (BT0 §7 / BT2 §7 bases, transcribed verbatim — as in the BT2 oracle).
 const F1 = [...flat(10, 3), [10, 12, 10, 11], [10, 12, 10, 10], [10, 11, 10, 10], [8, 8, 7, 7], [8, 9, 8, 9]];
@@ -295,7 +302,7 @@ describe('adjudicated-rule pins (direct BT2-shaped inputs)', () => {
         openPositionAccounting: { quantity: 1, entryCost: 1, markPrice: 1, markedValue: 1, unrealizedPnl: Number.MAX_VALUE },
         equitySeries: [1600, Number.MAX_VALUE],
       })),
-      /computeBacktestMetrics: netPnl non_finite_result/,
+      typedError(/netPnl non_finite_result/),
     );
   });
 
@@ -306,7 +313,7 @@ describe('adjudicated-rule pins (direct BT2-shaped inputs)', () => {
           { realizedPnl: Number.MAX_VALUE }, { realizedPnl: -1 }, { realizedPnl: Number.MAX_VALUE },
         ],
       })),
-      /computeBacktestMetrics: grossProfitTotal non_finite_result/,
+      typedError(/grossProfitTotal non_finite_result/),
     );
   });
 
@@ -315,7 +322,7 @@ describe('adjudicated-rule pins (direct BT2-shaped inputs)', () => {
       () => computeBacktestMetrics(direct({
         closedTradePnl: [{ realizedPnl: Number.MAX_VALUE }, { realizedPnl: -Number.MIN_VALUE }],
       })),
-      /computeBacktestMetrics: profitFactor non_finite_result/,
+      typedError(/profitFactor non_finite_result/),
     );
   });
 
@@ -327,7 +334,7 @@ describe('adjudicated-rule pins (direct BT2-shaped inputs)', () => {
         initialCash: 1, finalEquity: -Number.MAX_VALUE,
         equitySeries: [Number.MAX_VALUE, -Number.MAX_VALUE],
       })),
-      /computeBacktestMetrics: maxDrawdown non_finite_result/,
+      typedError(/maxDrawdown non_finite_result/),
     );
   });
 });
@@ -342,12 +349,12 @@ describe('input contract (§3): typed errors, no reconciliation', () => {
   const throws = (mutate, pattern) => {
     const input = valid();
     mutate(input);
-    assert.throws(() => computeBacktestMetrics(input), pattern);
+    assert.throws(() => computeBacktestMetrics(input), typedError(pattern));
   };
 
   it('rejects a non-object argument', () => {
     for (const bad of [null, undefined, 42, 'accounting']) {
-      assert.throws(() => computeBacktestMetrics(bad), /computeBacktestMetrics:/);
+      assert.throws(() => computeBacktestMetrics(bad), typedError(/accounting must be/));
     }
   });
 
