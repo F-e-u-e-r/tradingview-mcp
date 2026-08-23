@@ -7,6 +7,12 @@
  *   metadata, transparent raw values) over a _deps-stubbed getOhlcv;
  *   core/data keeps the TEMPORAL contract (pair-or-neither etc.) — inherited,
  *   not re-implemented, so its own suites remain the authority there.
+ *
+ * Issue #16 (vwap): the kernel vectors, the 1-minute resolution gate, and
+ * the D2 containment pins live in analytics_vwap.test.js; THIS file covers
+ * the vwap additions to the served boundary — the enum, the two period
+ * refusals (one moved from schema to core, one new), and the served vwap
+ * result shape.
  */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -58,11 +64,24 @@ describe('boundary — strictness and presence/type semantics', () => {
     await callExpectingInvalidParams({ indicator: 'rsi', period: 14, FROM: 1, TO: 2 });
     await callExpectingInvalidParams({ indicator: 'rsi', period: 14, banana: 1 });
   });
-  it('period is REQUIRED, positive-integer, never coerced', async () => {
-    await callExpectingInvalidParams({ indicator: 'rsi' });
+  it('period, when SUPPLIED, is a positive integer, never coerced (schema-level, unchanged)', async () => {
     for (const bad of ['14', 0, -1, 1.5, true, null, Infinity, NaN]) {
       await callExpectingInvalidParams({ indicator: 'rsi', period: bad });
     }
+  });
+  it('the two per-indicator period refusals are CORE refusals through the served seam (issue #16)', async () => {
+    // period became schema-OPTIONAL so vwap can omit it; presence policy
+    // moved to core/analytics. Both refusals are served error results with
+    // the core's typed message — NOT -32602 (the representation is legal;
+    // the combination is not).
+    const missing = await client.callTool({ name: 'data_compute_indicator', arguments: { indicator: 'rsi' } });
+    assert.equal(missing.isError, true);
+    assert.doesNotMatch(missing.content[0].text, /-32602/);
+    assert.match(missing.content[0].text, /rsi: period must be a positive integer, got: undefined/);
+    const supplied = await client.callTool({ name: 'data_compute_indicator', arguments: { indicator: 'vwap', period: 14 } });
+    assert.equal(supplied.isError, true);
+    assert.doesNotMatch(supplied.content[0].text, /-32602/);
+    assert.match(supplied.content[0].text, /vwap does not take a period/);
   });
   it('last, when provided, is a positive-integer JSON number only', async () => {
     for (const bad of ['50', 0, -3, 1.5, true, null]) {
@@ -77,6 +96,36 @@ describe('boundary — strictness and presence/type semantics', () => {
     const latest = parseArgs({ indicator: 'sma', period: 20 });
     assert.ok(latest.success);
     assert.deepEqual(latest.data, { indicator: 'sma', period: 20 });
+    // vwap is period-free at the schema: omission parses to exactly one key…
+    const vwapShape = parseArgs({ indicator: 'vwap' });
+    assert.ok(vwapShape.success);
+    assert.deepEqual(vwapShape.data, { indicator: 'vwap' });
+    // Every pre-vwap enum member is PRESERVED and the schema minimum is
+    // still 1 (r4 Sol F10–F11): a dropped member or a raised .min would
+    // refuse what the pre-#16 contract accepted.
+    for (const indicator of ['sma', 'ema', 'rsi', 'atr', 'donchian']) {
+      assert.ok(parseArgs({ indicator, period: 14 }).success, `${indicator} must stay schema-accepted`);
+      assert.ok(parseArgs({ indicator, period: 1 }).success, `${indicator} with the minimum period 1 must stay schema-accepted`);
+    }
+    // B+ served-metadata consistency (Sol B+ finding 1): the TOP-LEVEL
+    // description must not assert "completed 1-minute" — the owner
+    // precision forbids any terminal-1m completion claim, and the field
+    // description says so; the two must never contradict.
+    let served;
+    registerAnalyticsTools({ registerTool: (name, config) => { if (name === 'data_compute_indicator') served = config; } });
+    assert.doesNotMatch(served.description, /completed 1-minute/, 'the top-level description must not claim completed 1-minute analytics');
+    assert.match(served.inputSchema.shape.timeframe.description, /does NOT independently assert the terminal 1-minute bar is completed/);
+    assert.match(served.description, /completed five-minute|COMPLETED five-minute/, 'the completed claim belongs to the 5-minute side only');
+    // B+ amendment: `timeframe` is an optional claim, enum-curated.
+    assert.ok(parseArgs({ indicator: 'sma', period: 2, timeframe: '5' }).success);
+    assert.ok(parseArgs({ indicator: 'vwap', timeframe: '1' }).success);
+    assert.deepEqual(parseArgs({ indicator: 'vwap', timeframe: '5' }).data, { indicator: 'vwap', timeframe: '5' });
+    for (const bad of ['15', '05', 5, 1, 'five', null, '']) {
+      assert.ok(!parseArgs({ indicator: 'sma', period: 2, timeframe: bad }).success, `timeframe=${JSON.stringify(bad)} must be schema-refused`);
+    }
+    // …and vwap WITH a period is schema-legal too — that refusal is core's
+    // (the per-indicator combination policy), pinned in the served test above.
+    assert.ok(parseArgs({ indicator: 'vwap', period: 14 }).success);
     const windowed = parseArgs({ indicator: 'donchian', period: 20, from: 1700000000, to: 1700086400, last: 5 });
     assert.ok(windowed.success);
     assert.deepEqual(windowed.data, { indicator: 'donchian', period: 20, from: 1700000000, to: 1700086400, last: 5 });
@@ -100,20 +149,22 @@ function stubOhlcv(bars, extra = {}) {
 }
 
 describe('core — acquisition passthrough and transparent transport', () => {
-  it('forwards exactly {summary:false, count, from, to} to getOhlcv — last never reaches acquisition', async () => {
+  it('forwards exactly {summary:false, count, from, to, includeResolution:true} to getOhlcv — last never reaches acquisition', async () => {
+    // includeResolution is the D2 internal envelope opt-in: A2 always asks
+    // for the same-snapshot resolution; the served data_get_ohlcv never does.
     const { calls, getOhlcv } = stubOhlcv([bar(1, 10), bar(2, 11), bar(3, 12)]);
     await getIndicator({ indicator: 'sma', period: 2, count: 3, from: 100, to: 200, last: 1, _deps: { getOhlcv } });
     assert.equal(calls.length, 1);
-    assert.deepEqual(calls[0], { summary: false, count: 3, from: 100, to: 200 });
+    assert.deepEqual(calls[0], { summary: false, count: 3, from: 100, to: 200, includeResolution: true });
   });
   it('one-sided from/to is FORWARDED, never collapsed — pair validation stays the data layer\'s (round-1)', async () => {
     // A both-or-nothing collapse mutant would silently turn a from-only call
     // into latest mode instead of letting getOhlcv refuse the half-window.
     const { calls, getOhlcv } = stubOhlcv([bar(1, 10), bar(2, 11)]);
     await getIndicator({ indicator: 'sma', period: 1, from: 100, _deps: { getOhlcv } });
-    assert.deepEqual(calls[0], { summary: false, count: undefined, from: 100, to: undefined });
+    assert.deepEqual(calls[0], { summary: false, count: undefined, from: 100, to: undefined, includeResolution: true });
     await getIndicator({ indicator: 'sma', period: 1, to: 200, _deps: { getOhlcv } });
-    assert.deepEqual(calls[1], { summary: false, count: undefined, from: undefined, to: 200 });
+    assert.deepEqual(calls[1], { summary: false, count: undefined, from: undefined, to: 200, includeResolution: true });
   });
   it('getOhlcv refusals propagate unchanged (the data layer keeps the temporal contract)', async () => {
     const getOhlcv = async () => { throw new Error('No loaded bars fall within [1, 2] — sentinel'); };
@@ -214,7 +265,9 @@ describe('served seam — successful calls through the registered handler', () =
     sServer = new McpServer({ name: 'a2-served-test', version: '0.0.0' });
     const bars = Array.from({ length: 60 }, (_, i) => bar(i + 1, 100 + i));
     sCalls = [];
-    const getOhlcv = async (args) => { sCalls.push(args); return { success: true, bar_count: bars.length, total_available: 999, source: 'direct_bars', mode: 'latest', bars }; };
+    // resolution '1' rides the stub the way the enriched envelope serves it —
+    // non-vwap indicators ignore it; the served vwap test depends on it.
+    const getOhlcv = async (args) => { sCalls.push(args); return { success: true, bar_count: bars.length, total_available: 999, source: 'direct_bars', mode: 'latest', bars, resolution: '1' }; };
     registerAnalyticsTools(sServer, { getOhlcv });
     const [ct, st] = InMemoryTransport.createLinkedPair();
     sClient = new Client({ name: 'a2-served-client', version: '0.0.0' });
@@ -255,7 +308,105 @@ describe('served seam — successful calls through the registered handler', () =
   it('the handler forwards caller args verbatim into acquisition (spot check)', async () => {
     sCalls.length = 0;
     await callOk({ indicator: 'sma', period: 3, count: 42 });
-    assert.deepEqual(sCalls[0], { summary: false, count: 42, from: undefined, to: undefined });
+    assert.deepEqual(sCalls[0], { summary: false, count: 42, from: undefined, to: undefined, includeResolution: true });
+  });
+  it('the served handler forwards a HISTORICAL window into acquisition — from/to survive the destructure (r2 Sol F9)', async () => {
+    // The core-level forwarding test cannot see a handler that drops
+    // from/to before calling core; this drives the windowed shape through
+    // the SDK and asserts the acquisition args.
+    sCalls.length = 0;
+    await callOk({ indicator: 'vwap', from: 100, to: 200 });
+    assert.deepEqual(sCalls[0], { summary: false, count: undefined, from: 100, to: 200, includeResolution: true });
+  });
+  it('served non-vwap responses do NOT carry the vwap-only field — the handler must not synthesize it (r2 Sol F10)', async () => {
+    const r = await callOk({ indicator: 'sma', period: 8 });
+    assert.equal('zero_volume_nulls_total' in r.metadata, false, 'zero_volume_nulls_total synthesized at the served seam');
+  });
+  it('served vwap: window-anchored values, vwap-only metadata, and NO period field', async () => {
+    // 60 equal-volume bars, closes 100..159 with symmetric spread → hlc3 =
+    // close exactly, so vwap[i] = mean(100..100+i) = 100 + i/2 — dyadic-exact.
+    const r = await callOk({ indicator: 'vwap', last: 2 });
+    assert.deepEqual(r.series.value, [129, 129.5]);
+    assert.equal(r.metadata.total, 60);
+    assert.equal(r.metadata.returned, 2);
+    assert.equal(r.metadata.warmup_nulls_total, 0);
+    assert.equal(r.metadata.zero_volume_nulls_total, 0);
+    assert.equal('period' in r, false, 'the served vwap result omits period — not null, not 0');
+  });
+  it('served vwap values are RAW doubles — a non-dyadic value survives the handler bit-exactly (r3 Sol F8)', async () => {
+    // The shared served stub's equal-volume bars only ever produce
+    // integers and halves, which a 2-dp rounding mutant preserves; this
+    // fixture's (10 + 40) / 3 does not.
+    const lServer = new McpServer({ name: 'a2-served-raw-test', version: '0.0.0' });
+    const bars = [
+      { time: 1, open: 10, high: 10, low: 10, close: 10, volume: 1 },
+      { time: 2, open: 20, high: 20, low: 20, close: 20, volume: 2 },
+    ];
+    const getOhlcv = async () => ({ success: true, bar_count: bars.length, total_available: 999, source: 'direct_bars', mode: 'latest', bars, resolution: '1' });
+    registerAnalyticsTools(lServer, { getOhlcv });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const lClient = new Client({ name: 'a2-served-raw-client', version: '0.0.0' });
+    await Promise.all([lServer.connect(st), lClient.connect(ct)]);
+    try {
+      const res = await lClient.callTool({ name: 'data_compute_indicator', arguments: { indicator: 'vwap' } });
+      assert.ok(!res.isError, res.content?.[0]?.text?.slice(0, 120));
+      const r = JSON.parse(res.content[0].text);
+      assert.equal(r.series.value[1], (10 + 20 * 2) / 3, 'a handler-side rounding layer breaks bit-exact transport');
+    } finally {
+      await lClient.close();
+      await lServer.close();
+    }
+  });
+  it('served timeframe "5" derives completed 5m analytics through the SDK (B+ amendment)', async () => {
+    const lServer = new McpServer({ name: 'a2-served-5m-derive', version: '0.0.0' });
+    const bars = [
+      { time: 0, open: 4, high: 4, low: 4, close: 4, volume: 1 },
+      { time: 60, open: 10, high: 10, low: 10, close: 10, volume: 1 },
+      { time: 300, open: 40, high: 40, low: 40, close: 40, volume: 2 },
+      { time: 600, open: 9, high: 9, low: 9, close: 9, volume: 5 }, // terminal — excluded
+    ];
+    const getOhlcv = async () => ({ success: true, bar_count: bars.length, total_available: 999, source: 'direct_bars', mode: 'latest', bars, resolution: '1' });
+    registerAnalyticsTools(lServer, { getOhlcv });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const lClient = new Client({ name: 'a2-served-5m-derive-client', version: '0.0.0' });
+    await Promise.all([lServer.connect(st), lClient.connect(ct)]);
+    try {
+      const res = await lClient.callTool({ name: 'data_compute_indicator', arguments: { indicator: 'vwap', timeframe: '5' } });
+      assert.ok(!res.isError, res.content?.[0]?.text?.slice(0, 160));
+      const r = JSON.parse(res.content[0].text);
+      assert.equal(r.timeframe, '5');
+      assert.deepEqual(r.times, [0, 300]);
+      assert.deepEqual(r.series.value, [7, 23.5]);
+      assert.equal(r.metadata.incomplete_terminal_1m_bars, 1);
+      const smaRes = await lClient.callTool({ name: 'data_compute_indicator', arguments: { indicator: 'sma', period: 1, timeframe: '5' } });
+      assert.ok(!smaRes.isError);
+      const s = JSON.parse(smaRes.content[0].text);
+      assert.deepEqual(s.series.value, [10, 40], 'A1 sma over the derived 5m closes');
+      assert.equal('zero_volume_nulls_total' in s.metadata, false);
+    } finally {
+      await lClient.close();
+      await lServer.close();
+    }
+  });
+  it('served vwap on a non-1-minute chart is refused by the gate, naming required and actual', async () => {
+    const lServer = new McpServer({ name: 'a2-served-5m-test', version: '0.0.0' });
+    const bars = [bar(1, 10), bar(2, 11)];
+    const getOhlcv = async () => ({ success: true, bar_count: bars.length, total_available: 999, source: 'direct_bars', mode: 'latest', bars, resolution: '60' });
+    registerAnalyticsTools(lServer, { getOhlcv });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const lClient = new Client({ name: 'a2-served-5m-client', version: '0.0.0' });
+    await Promise.all([lServer.connect(st), lClient.connect(ct)]);
+    try {
+      const res = await lClient.callTool({ name: 'data_compute_indicator', arguments: { indicator: 'vwap' } });
+      assert.equal(res.isError, true);
+      // parse first: inside the served JSON the quotes are escaped (\"1\")
+      const body = JSON.parse(res.content[0].text);
+      assert.equal(body.success, false);
+      assert.match(body.error, /exactly "1", got: "60"/);
+    } finally {
+      await lClient.close();
+      await lServer.close();
+    }
   });
 });
 
@@ -266,7 +417,7 @@ describe('A2 invariants', () => {
     const src = readFileSync(join(here, '../src/core/analytics.js'), 'utf8');
     const code = src.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
     const imports = [...code.matchAll(/from '([^']+)'/g)].map((m) => m[1]).sort();
-    assert.deepEqual(imports, ['../analytics/indicators.js', './data.js']);
+    assert.deepEqual(imports, ['../analytics/indicators.js', '../analytics/timeframe.js', '../analytics/vwap.js', './data.js']);
     for (const banned of ['connection', 'evaluate', 'fetch', 'WebSocket', 'CDP']) {
       assert.ok(!code.includes(banned), `core/analytics must not reference ${banned}`);
     }

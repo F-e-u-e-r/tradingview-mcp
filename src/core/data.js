@@ -30,8 +30,18 @@ const MAX_OHLCV_BARS = 500;
 // destroying precision on forex/crypto prices (upstream issue #77).
 const roundPrice = (v) => (v == null ? null : Math.round(v * 1e8) / 1e8);
 const BARS_PATH = KNOWN_PATHS.mainSeriesBars;
+const CHART_PATH = KNOWN_PATHS.chartApi;
 
-export async function getOhlcv({ count, summary = true, from, to, _deps } = {}) {
+// `includeResolution` (issue #16, owner ruling D2) is an INTERNAL opt-in for
+// core callers only: when true, the result additionally carries the
+// AUTHORITATIVE chart.resolution() — read inside the SAME page evaluation
+// that snapshots the bars, so the two can never race apart — as `resolution`
+// (the value VERBATIM — string or number as the API returned it, never
+// coerced — or null when it cannot be established; never invented). The
+// served data_get_ohlcv never opts in, so its public response shape is
+// UNCHANGED — that containment is regression-pinned in the vwap test
+// suite. This is acquisition metadata, not a new acquisition path.
+export async function getOhlcv({ count, summary = true, from, to, includeResolution = false, _deps } = {}) {
   // Injection seam, same shape the other core modules already use. It carries no
   // capability of its own: production passes nothing and gets connection.js's
   // narrow evaluate().
@@ -77,6 +87,18 @@ export async function getOhlcv({ count, summary = true, from, to, _deps } = {}) 
       (function() {
         var bars = ${BARS_PATH};
         if (!bars || typeof bars.lastIndex !== 'function') return null;
+        // Same-snapshot authoritative resolution (issue #16 D2): read in the
+        // SAME synchronous evaluation as the bars — a second evaluate could
+        // race a chart/timeframe switch between the two reads. Transported
+        // VERBATIM (string or number, as the API returned it): a String()
+        // shim here would manufacture acceptance of numeric 1, an alias the
+        // D2 ruling forbids unless production characterization proves it.
+        // Anything non-JSON-primitive stays null (unestablished).
+        var resolution = null;
+        try {
+          var res = ${CHART_PATH}.resolution();
+          if (typeof res === 'string' || typeof res === 'number') resolution = res;
+        } catch (e) {}
         var first = bars.firstIndex(), end = bars.lastIndex();
         var windowed = ${windowed ? 'true' : 'false'};
         var result = [], truncated = false;
@@ -103,7 +125,7 @@ export async function getOhlcv({ count, summary = true, from, to, _deps } = {}) 
             if (w) result.push(mk(w));
           }
         }
-        return {bars: result, total_bars: bars.size(), truncated: truncated, source: 'direct_bars'};
+        return {bars: result, total_bars: bars.size(), truncated: truncated, source: 'direct_bars', resolution: resolution};
       })()
     `);
   } catch { data = null; }
@@ -140,10 +162,15 @@ export async function getOhlcv({ count, summary = true, from, to, _deps } = {}) 
       change_pct: Math.round(((last.close - first.open) / first.open) * 10000) / 100 + '%',
       avg_volume: Math.round(volumes.reduce((a, b) => a + b, 0) / volumes.length),
       last_5_bars: bars.slice(-5),
+      // Internal callers only (D2 containment): the served tool never opts in.
+      ...(includeResolution ? { resolution: data.resolution ?? null } : {}),
     };
   }
 
   const base = { success: true, bar_count: data.bars.length, total_available: data.total_bars, source: data.source, bars: data.bars };
+  // Internal callers only (D2 containment): the served tool never opts in,
+  // so data_get_ohlcv's public shape does not change.
+  if (includeResolution) base.resolution = data.resolution ?? null;
   if (windowed) {
     base.mode = 'window';
     base.requested_window = { from: f, to: t };
