@@ -34,16 +34,26 @@
  * (BT2's guard doctrine is accounting-specific, not an indicator-kernel
  * rule). Exactly TWO narrow guards exist, each admitted under that
  * disposition's carve-out by executable proof of a binding output-
- * invariant violation: the contribution-dropout guard (underflow to 0
- * silently misweights — r2 Luna F1) and the cumulative-sum finiteness
- * guard (overflow to Infinity serializes as JSON null while the null
- * count claims zero — r2 Sol F1). Nothing else is guarded.
+ * invariant violation: the subnormal-contribution guard (a contribution
+ * inside the subnormal gap quantizes with unbounded relative error —
+ * dropout to 0, r2 Luna F1; interior quantization [2] for hlc3 1.5, r3
+ * Sol F1) and the cumulative-sum finiteness guard (overflow to Infinity
+ * serializes as JSON null while the null count claims zero — r2 Sol F1;
+ * both sums guarded, r3). A zero-volume bar's prices are never read at
+ * all (r3 Sol F2 — Infinity × 0 = NaN must not poison the sums; the
+ * zero-volume semantics promise the bar contributes NOTHING). Nothing
+ * else is guarded.
  *
  * DEFERRED (owner ruling D3 — recorded as binding on future work, not
  * implemented here): higher-timeframe VWAP, if later added, MUST aggregate
  * the canonical 1-minute weighted-value and volume contributions; it MUST
  * NOT recompute VWAP from higher-timeframe aggregated OHLC.
  */
+
+// Smallest NORMAL double (2^-1022). Contributions below this line live in
+// the subnormal gap, where relative quantization error is unbounded — the
+// admitted guard in vwap() refuses them rather than misweighting silently.
+const MIN_NORMAL = 2.2250738585072014e-308;
 
 function requireEqualLengths(name, columns) {
   const n = columns[0].length;
@@ -75,28 +85,36 @@ export function vwap(highs, lows, closes, volumes) {
     if (typeof volume !== 'number' || !(volume >= 0)) {
       throw new Error(`vwap: volume must be a non-negative number, got: ${volume} (index ${i})`);
     }
-    const hlc3 = (highs[i] + lows[i] + closes[i]) / 3;
-    const contribution = hlc3 * volume;
-    // Narrow dropout guard (r2 Luna F1, admitted under the owner's
-    // overflow disposition by executable proof): a positive volume whose
-    // contribution UNDERFLOWS to exactly zero would silently drop this
-    // bar's weight while still counting its volume — e.g. volume
-    // Number.MIN_VALUE at hlc3 0.5 returned 0 where the contract requires
-    // the first bar to equal its hlc3. Fail loud instead of misweighting.
-    // This is that demonstrated class only — no general overflow policy.
-    if (volume > 0 && hlc3 !== 0 && contribution === 0) {
-      throw new Error(`vwap: contribution underflowed to zero (hlc3 ${hlc3} × volume ${volume}, index ${i}) — accumulating it would silently drop this bar's weight`);
-    }
-    cumWeighted += contribution;
-    cumVolume += volume;
-    // Overflow twin of the dropout guard above (r2 Sol F1, same
-    // admission): 2 × Number.MAX_VALUE overflows the weighted sum to
-    // Infinity, the emitted value serializes to JSON null, and the
-    // response would still claim zero_volume_nulls_total: 0 — a silently
-    // ABSENT value this time. Fail loud the moment a cumulative sum
-    // leaves the representable range.
-    if (!Number.isFinite(cumWeighted) || !Number.isFinite(cumVolume)) {
-      throw new Error(`vwap: cumulative sums are no longer finite (Σweighted ${cumWeighted}, Σvolume ${cumVolume}, index ${i}) — the average cannot be represented faithfully`);
+    // A zero-volume bar contributes NOTHING — its prices are never even
+    // read (r3 Sol F2, same admission as the guards below: an extreme
+    // price on a volume-0 bar must not poison the sums through
+    // Infinity × 0 = NaN; the point stays null or repeats the prior
+    // value, exactly as the zero-volume semantics promise).
+    if (volume > 0) {
+      const hlc3 = (highs[i] + lows[i] + closes[i]) / 3;
+      const contribution = hlc3 * volume;
+      // Subnormal-contribution guard (r2 Luna F1, GENERALIZED by r3 Sol
+      // F1, each admitted under the owner's overflow disposition by
+      // executable proof): a nonzero contribution inside the subnormal
+      // gap carries unbounded relative quantization error — volume
+      // Number.MIN_VALUE at hlc3 0.5 dropped to 0 (r2), and at hlc3 1.5
+      // it rounded to 2×MIN_VALUE, answering [2] where the contract
+      // requires the first bar to equal its hlc3 (r3). Below the normal
+      // range the weighted sum cannot be faithful — fail loud.
+      if (hlc3 !== 0 && Math.abs(contribution) < MIN_NORMAL) {
+        throw new Error(`vwap: contribution is below the normal floating-point range (hlc3 ${hlc3} × volume ${volume} = ${contribution}, index ${i}) — subnormal quantization would silently misweight the average`);
+      }
+      cumWeighted += contribution;
+      cumVolume += volume;
+      // Overflow twin (r2 Sol F1, same admission): 2 × Number.MAX_VALUE
+      // overflows the weighted sum to Infinity, the emitted value
+      // serializes to JSON null, and the response would still claim
+      // zero_volume_nulls_total: 0 — a silently ABSENT value this time.
+      // Both sums are guarded: a cumVolume overflow alone would emit a
+      // silently wrong 0 (finite ÷ Infinity).
+      if (!Number.isFinite(cumWeighted) || !Number.isFinite(cumVolume)) {
+        throw new Error(`vwap: cumulative sums are no longer finite (Σweighted ${cumWeighted}, Σvolume ${cumVolume}, index ${i}) — the average cannot be represented faithfully`);
+      }
     }
     if (cumVolume > 0) result[i] = cumWeighted / cumVolume;
   }

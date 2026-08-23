@@ -118,19 +118,38 @@ describe('vwap kernel — window-relative Σ(hlc3×volume)/Σ(volume)', () => {
     assert.throws(() => vwap([10], [10], [10], [-1]), { message: /vwap: volume must be a non-negative number/ });
     assert.throws(() => vwap(...cols([vbar(1, 10, 0), vbar(2, 20, -1)])), { message: /vwap: volume must be a non-negative number/ });
   });
-  it('a positive volume whose contribution underflows to zero is refused — never silently misweighted (r2 Luna F1)', () => {
-    // Reproduction of the confirmed defect: volume Number.MIN_VALUE at
-    // hlc3 0.5 → contribution rounds to exactly 0 while cumVolume > 0,
-    // so the pre-fix kernel returned [0] where the contract requires the
-    // first bar to equal its hlc3 (a silently wrong VALUE, the class the
-    // issue explicitly bans).
+  it('a contribution below the NORMAL range is refused — dropout and quantization alike (r2 Luna F1, generalized r3 Sol F1)', () => {
+    // Dropout endpoint (r2): 0.5 × MIN_VALUE rounds to exactly 0 — the
+    // pre-r2 kernel returned [0] where the contract requires the first
+    // bar to equal its hlc3.
     assert.throws(
       () => vwap([0.5], [0.5], [0.5], [Number.MIN_VALUE]),
-      { message: /vwap: contribution underflowed to zero/ },
+      { message: /vwap: contribution is below the normal floating-point range/ },
     );
-    // Positive control: a tiny volume whose contribution SURVIVES stays
-    // exact — 0.5 × 1e-300 = 5e-301 ≠ 0, and 5e-301 / 1e-300 = 0.5.
+    // Quantization interior (r3): 1.5 × MIN_VALUE rounds to 2×MIN_VALUE —
+    // the pre-r3 kernel returned [2] for hlc3 1.5 (33% error, silently).
+    assert.throws(
+      () => vwap([1.5], [1.5], [1.5], [Number.MIN_VALUE]),
+      { message: /vwap: contribution is below the normal floating-point range/ },
+    );
+    // Positive control: a NORMAL tiny contribution survives exactly —
+    // 0.5 × 1e-300 = 5e-301 (normal), and 5e-301 / 1e-300 = 0.5.
     assert.deepEqual(vwap([0.5], [0.5], [0.5], [1e-300]), [0.5]);
+  });
+  it('a zero-volume bar\'s PRICES are never read — an overflowing hlc3 there cannot poison the sums (r3 Sol F2)', () => {
+    // (M+M+M)/3 = Infinity, and Infinity × 0 = NaN: before the fix this
+    // threw the sums guard; the contract requires the volume-0 bar to
+    // contribute NOTHING — [null, 10] — and the interior variant to
+    // repeat the prior value.
+    const M = Number.MAX_VALUE;
+    assert.deepEqual(vwap([M, 10], [M, 10], [M, 10], [0, 1]), [null, 10]);
+    assert.deepEqual(vwap([10, M, 20], [10, M, 20], [10, M, 20], [1, 0, 3]), [10, 10, (10 + 60) / 4]);
+  });
+  it('an all-zero price bar with positive volume is a LEGITIMATE zero contribution (r3 Sol F3)', () => {
+    // hlc3 === 0 exactly: the subnormal guard must not fire — the
+    // average of zero prices is 0, not an error.
+    assert.deepEqual(vwap([0], [0], [0], [1]), [0]);
+    assert.deepEqual(vwap([0, 30], [0, 30], [0, 30], [1, 1]), [0, 15]);
   });
   it('a cumulative sum that overflows to Infinity is refused — never a silent JSON null (r2 Sol F1)', () => {
     // Reproduction of the confirmed defect: hlc3 2 × volume MAX_VALUE
@@ -150,6 +169,14 @@ describe('vwap kernel — window-relative Σ(hlc3×volume)/Σ(volume)', () => {
     );
     // Positive control: one huge-but-finite bar computes exactly.
     assert.deepEqual(vwap(...cols([vbar(1, 1e307, 1)])), [1e307]);
+  });
+  it('cumulative VOLUME overflow alone is refused too — both sums are guarded (r3 Luna F1)', () => {
+    // hlc3 Number.MIN_VALUE with volumes Number.MAX_VALUE: every
+    // contribution stays finite (~8.9e-16) while Σvolume overflows to
+    // Infinity at index 1 — a cumWeighted-only guard would emit a
+    // silently wrong 0 (finite ÷ Infinity).
+    const bars = [vbar(1, Number.MIN_VALUE, Number.MAX_VALUE), vbar(2, Number.MIN_VALUE, Number.MAX_VALUE)];
+    assert.throws(() => vwap(...cols(bars)), { message: /vwap: cumulative sums are no longer finite/ });
   });
   it('a one-bar all-zero-volume window is the same typed error as the multi-bar case (r2 Sol F2)', () => {
     assert.throws(() => vwap([10], [10], [10], [0]), { message: /vwap: cumulative volume is zero across the entire window/ });
@@ -244,6 +271,16 @@ describe('core — vwap through getIndicator', () => {
       assert.equal(calls.length, 1, 'the gate reads the SAME acquisition — exactly one fetch, no second evaluate');
     }
   });
+  it('the gate names a FALSY authoritative 0 verbatim — got: 0, never collapsed to null (r3 Luna F2)', async () => {
+    // The gate has its own ?? null; a || null mutant would report
+    // got: null for an authoritative numeric 0, violating "names actual"
+    // (the data-assembly twin of this pin is in the containment suite).
+    const { getOhlcv } = stubOhlcv([vbar(1, 10, 1)], { resolution: 0 });
+    await assert.rejects(
+      () => getIndicator({ indicator: 'vwap', _deps: { getOhlcv } }),
+      { message: /exactly "1", got: 0\. Set/ },
+    );
+  });
   it('an unestablished resolution (envelope null / legacy stub without the field) fails CLOSED', async () => {
     const bars = [vbar(1, 10, 1)];
     for (const extra of [{}, { resolution: null }]) {
@@ -287,13 +324,20 @@ describe('core — vwap through getIndicator', () => {
       { message: /vwap: volume must be a non-negative number/ },
     );
   });
-  it('a non-vwap indicator with a missing/invalid period is refused BEFORE acquisition with the kernel\'s exact message', async () => {
+  it('EVERY non-vwap indicator with a missing/invalid period is refused BEFORE acquisition with the kernel\'s exact message (r3 Sol F6)', async () => {
+    // rsi/atr/donchian kernels carry DEFAULTS (14/14/20): a per-indicator
+    // exemption mutant in the core gate would silently compute with the
+    // kernel default instead of refusing — so the omission refusal is
+    // pinned for all five, not a sample.
     const calls = [];
     const getOhlcv = async (args) => { calls.push(args); throw new Error('acquisition must not run'); };
-    await assert.rejects(
-      () => getIndicator({ indicator: 'sma', _deps: { getOhlcv } }),
-      { message: 'sma: period must be a positive integer, got: undefined' },
-    );
+    for (const indicator of ['sma', 'ema', 'rsi', 'atr', 'donchian']) {
+      await assert.rejects(
+        () => getIndicator({ indicator, _deps: { getOhlcv } }),
+        { message: `${indicator}: period must be a positive integer, got: undefined` },
+        indicator,
+      );
+    }
     await assert.rejects(
       () => getIndicator({ indicator: 'rsi', period: 0, _deps: { getOhlcv } }),
       { message: 'rsi: period must be a positive integer, got: 0' },
@@ -347,6 +391,15 @@ describe('core — vwap through getIndicator', () => {
     const { getOhlcv } = stubOhlcv(bars, oneMinute);
     const r = await getIndicator({ indicator: 'vwap', _deps: { getOhlcv } });
     assert.equal(r.series.value[1], (10 + 20 * 2) / 3, 'any rounding layer in the dispatch breaks bit-exactness');
+  });
+  it('zero_volume_nulls_total counts NULL POINTS, not zero-volume bars (r3 Sol F5)', async () => {
+    // An interior zero-volume bar produces NO null (the value repeats) —
+    // a count-the-zero-volume-bars mutant reports 1 here.
+    const bars = [vbar(1, 10, 1), vbar(2, 999, 0), vbar(3, 20, 3)];
+    const { getOhlcv } = stubOhlcv(bars, oneMinute);
+    const r = await getIndicator({ indicator: 'vwap', _deps: { getOhlcv } });
+    assert.deepEqual(r.series.value, [10, 10, (10 + 60) / 4]);
+    assert.equal(r.metadata.zero_volume_nulls_total, 0, 'no null points exist — the zero-volume BAR is not a null');
   });
   it('zero_volume_nulls_total stays the FULL-window count under last (r1 Luna F6)', async () => {
     const bars = [vbar(1, 10, 0), vbar(2, 20, 0), vbar(3, 40, 4)];
@@ -452,6 +505,13 @@ describe('data — same-snapshot resolution stays out of the public shape', () =
     assert.equal(r.success, true);
     assert.deepEqual(r.series.value, [10]);
     assert.equal(r.metadata.zero_volume_nulls_total, 0);
+  });
+  it('the snippet transports WHITESPACE strings verbatim — " 1 " reaches the gate untrimmed and is refused (r3 Sol F7)', async () => {
+    const chained = (args) => getOhlcv({ ...args, _deps: { evaluate: snippetPage(' 1 ') } });
+    await assert.rejects(
+      () => getIndicator({ indicator: 'vwap', _deps: { getOhlcv: chained } }),
+      { message: /exactly "1", got: " 1 "/ },
+    );
   });
   it('the snippet transports alias STRINGS verbatim — "1m" reaches the gate as "1m" and is refused (r2 Sol F6)', async () => {
     // An in-snippet normalization ("1m" → "1") would be invisible to the

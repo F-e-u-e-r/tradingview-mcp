@@ -310,6 +310,30 @@ describe('served seam — successful calls through the registered handler', () =
     assert.equal(r.metadata.zero_volume_nulls_total, 0);
     assert.equal('period' in r, false, 'the served vwap result omits period — not null, not 0');
   });
+  it('served vwap values are RAW doubles — a non-dyadic value survives the handler bit-exactly (r3 Sol F8)', async () => {
+    // The shared served stub's equal-volume bars only ever produce
+    // integers and halves, which a 2-dp rounding mutant preserves; this
+    // fixture's (10 + 40) / 3 does not.
+    const lServer = new McpServer({ name: 'a2-served-raw-test', version: '0.0.0' });
+    const bars = [
+      { time: 1, open: 10, high: 10, low: 10, close: 10, volume: 1 },
+      { time: 2, open: 20, high: 20, low: 20, close: 20, volume: 2 },
+    ];
+    const getOhlcv = async () => ({ success: true, bar_count: bars.length, total_available: 999, source: 'direct_bars', mode: 'latest', bars, resolution: '1' });
+    registerAnalyticsTools(lServer, { getOhlcv });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const lClient = new Client({ name: 'a2-served-raw-client', version: '0.0.0' });
+    await Promise.all([lServer.connect(st), lClient.connect(ct)]);
+    try {
+      const res = await lClient.callTool({ name: 'data_compute_indicator', arguments: { indicator: 'vwap' } });
+      assert.ok(!res.isError, res.content?.[0]?.text?.slice(0, 120));
+      const r = JSON.parse(res.content[0].text);
+      assert.equal(r.series.value[1], (10 + 20 * 2) / 3, 'a handler-side rounding layer breaks bit-exact transport');
+    } finally {
+      await lClient.close();
+      await lServer.close();
+    }
+  });
   it('served vwap on a non-1-minute chart is refused by the gate, naming required and actual', async () => {
     const lServer = new McpServer({ name: 'a2-served-5m-test', version: '0.0.0' });
     const bars = [bar(1, 10), bar(2, 11)];
