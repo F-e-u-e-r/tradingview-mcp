@@ -17,9 +17,25 @@
  * A2-layer truncation at all. `warmup_nulls_total` is counted on the full
  * pre-truncation series so a null-free returned tail cannot misread as
  * "this indicator has no warm-up".
+ *
+ * vwap (issue #16, owner rulings D1–D4 2026-08-23) rides the same
+ * orchestration with three per-indicator deltas, all enforced here:
+ *   - period policy: vwap takes NO period (supplying one is refused, never
+ *     silently ignored); every other indicator requires the positive
+ *     integer it always has. Both refusals fire BEFORE acquisition.
+ *   - 1-minute canon (D2): vwap requires the AUTHORITATIVE chart
+ *     resolution — captured by core/data in the SAME evaluate snapshot as
+ *     the bars via the internal includeResolution envelope — to be exactly
+ *     "1". No aliases, no bar-spacing inference, fail closed when
+ *     unestablished, refused before the kernel runs.
+ *   - null metadata (D4): vwap has no warm-up; its nulls mean "cumulative
+ *     volume still zero", reported in the vwap-only
+ *     zero_volume_nulls_total while warmup_nulls_total stays 0, and the
+ *     result omits `period` entirely.
  */
 import { getOhlcv as _getOhlcv } from './data.js';
 import { sma, ema, rsi, atr, donchian } from '../analytics/indicators.js';
+import { vwap } from '../analytics/vwap.js';
 
 function _resolve(deps) {
   return { getOhlcv: deps?.getOhlcv || _getOhlcv };
@@ -35,13 +51,41 @@ export async function getIndicator({ indicator, period, count, from, to, last, _
     throw new Error(`last must be a positive integer when provided, got: ${JSON.stringify(last)}`);
   }
 
-  const ohlcv = await getOhlcv({ summary: false, count, from, to });
+  // Per-indicator period policy (issue #16), enforced BEFORE acquisition so
+  // a refusable call never fetches. The non-vwap message matches the kernel
+  // guards byte-for-byte; the kernels keep their own guard as the
+  // direct-call belt.
+  const isVwap = indicator === 'vwap';
+  if (isVwap) {
+    if (period !== undefined) {
+      throw new Error(`vwap does not take a period — it accumulates from the first bar of the returned window; omit period. got: ${JSON.stringify(period)}`);
+    }
+  } else if (typeof period !== 'number' || !Number.isInteger(period) || period < 1) {
+    throw new Error(`${indicator}: period must be a positive integer, got: ${period}`);
+  }
+
+  const ohlcv = await getOhlcv({ summary: false, count, from, to, includeResolution: true });
+
+  // 1-minute canon (owner ruling D2): no timeframe parameter exists on this
+  // path — the bars are whatever the chart currently serves — so the gate
+  // reads the AUTHORITATIVE chart.resolution() captured in the SAME
+  // acquisition snapshot as the bars (never a second evaluate, never
+  // inferred from bar spacing) and requires EXACTLY "1". Refused before the
+  // kernel: a coarser chart can never produce an OHLC-approximated "VWAP"
+  // under this tool's name.
+  if (isVwap) {
+    const resolution = ohlcv.resolution ?? null;
+    if (resolution !== '1') {
+      throw new Error(`vwap requires the chart at 1-minute resolution — the authoritative chart resolution must be exactly "1", got: ${JSON.stringify(resolution)}. Set the chart to 1-minute (chart_set_timeframe) and retry.`);
+    }
+  }
 
   const bars = ohlcv.bars;
   const closes = bars.map((b) => b.close);
   const highs = bars.map((b) => b.high);
   const lows = bars.map((b) => b.low);
   const times = bars.map((b) => b.time);
+  const volumes = bars.map((b) => b.volume);
 
   let series;
   if (indicator === 'sma') series = { value: sma(closes, period) };
@@ -51,6 +95,8 @@ export async function getIndicator({ indicator, period, count, from, to, last, _
   else if (indicator === 'donchian') {
     const d = donchian(highs, lows, period);
     series = { upper: d.upper, middle: d.middle, lower: d.lower };
+  } else if (isVwap) {
+    series = { value: vwap(highs, lows, closes, volumes) };
   } else {
     // unreachable through the served enum; refuse rather than guess for a
     // direct caller
@@ -59,8 +105,10 @@ export async function getIndicator({ indicator, period, count, from, to, last, _
 
   const total = bars.length;
   const reference = series.value ?? series.upper;
-  let warmupNullsTotal = 0;
-  for (const v of reference) if (v === null) warmupNullsTotal += 1;
+  // For sma/ema/rsi/atr/donchian these are WARM-UP nulls; for vwap they are
+  // zero-volume nulls (D4) — same count, reported under the honest name.
+  let nullsTotal = 0;
+  for (const v of reference) if (v === null) nullsTotal += 1;
 
   // Tail-slice OUTPUT only, after the full-window computation above.
   const returned = last === undefined ? total : Math.min(last, total);
@@ -72,7 +120,9 @@ export async function getIndicator({ indicator, period, count, from, to, last, _
   const result = {
     success: true,
     indicator,
-    period,
+    // vwap OMITS period (D4): never null, never a fabricated 0 — the field
+    // pattern follows requested_window's conditional-presence precedent.
+    ...(period !== undefined ? { period } : {}),
     source: {
       mode: ohlcv.mode,
       bar_count: total,
@@ -88,12 +138,18 @@ export async function getIndicator({ indicator, period, count, from, to, last, _
       total,
       returned,
       truncated: returned < total,
-      warmup_nulls_total: warmupNullsTotal,
+      warmup_nulls_total: isVwap ? 0 : nullsTotal,
+      // vwap-only (D4): its nulls are "cumulative volume still zero", not
+      // warm-up. The field appears on NO other indicator's response.
+      ...(isVwap ? { zero_volume_nulls_total: nullsTotal } : {}),
     },
     times: slice(times),
     series: outSeries,
   };
-  if (total > 0 && warmupNullsTotal === total) {
+  // Warm-up semantics only: vwap cannot reach an all-null result (its
+  // kernel refuses a zero-total-volume window loudly), and this note's
+  // wording is meaningless without a period.
+  if (!isVwap && total > 0 && nullsTotal === total) {
     result.note = `Insufficient history for period ${period}: all ${total} value(s) are warm-up nulls (documented kernel semantics, not an error). Fetch more bars or use a smaller period.`;
   }
   return result;
