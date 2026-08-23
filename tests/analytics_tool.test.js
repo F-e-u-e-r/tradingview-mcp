@@ -100,6 +100,13 @@ describe('boundary — strictness and presence/type semantics', () => {
     const vwapShape = parseArgs({ indicator: 'vwap' });
     assert.ok(vwapShape.success);
     assert.deepEqual(vwapShape.data, { indicator: 'vwap' });
+    // Every pre-vwap enum member is PRESERVED and the schema minimum is
+    // still 1 (r4 Sol F10–F11): a dropped member or a raised .min would
+    // refuse what the pre-#16 contract accepted.
+    for (const indicator of ['sma', 'ema', 'rsi', 'atr', 'donchian']) {
+      assert.ok(parseArgs({ indicator, period: 14 }).success, `${indicator} must stay schema-accepted`);
+      assert.ok(parseArgs({ indicator, period: 1 }).success, `${indicator} with the minimum period 1 must stay schema-accepted`);
+    }
     // …and vwap WITH a period is schema-legal too — that refusal is core's
     // (the per-indicator combination policy), pinned in the served test above.
     assert.ok(parseArgs({ indicator: 'vwap', period: 14 }).success);

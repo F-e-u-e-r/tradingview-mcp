@@ -136,6 +136,33 @@ describe('vwap kernel — window-relative Σ(hlc3×volume)/Σ(volume)', () => {
     // 0.5 × 1e-300 = 5e-301 (normal), and 5e-301 / 1e-300 = 0.5.
     assert.deepEqual(vwap([0.5], [0.5], [0.5], [1e-300]), [0.5]);
   });
+  it('the guards sit EXACTLY on their boundaries — normal floor, |·|, and the finite maximum all compute (r4 Luna F1–F3)', () => {
+    // 2^-1022 is the smallest NORMAL double: the subnormal guard is
+    // strict `<`, so a contribution of exactly MIN_NORMAL computes.
+    assert.deepEqual(vwap([1], [1], [1], [2.2250738585072014e-308]), [1]);
+    // The contract imposes no price-sign restriction: hlc3 −1 gives a
+    // NEGATIVE normal contribution — |·| keeps it computable (a bare
+    // `contribution < MIN_NORMAL` would refuse every negative price).
+    assert.deepEqual(vwap([-1], [-1], [-1], [1]), [-1]);
+    // Number.MAX_VALUE is finite: sums that land exactly there compute
+    // (the guard is isFinite, not a >= MAX_VALUE ceiling).
+    assert.deepEqual(vwap([1], [1], [1], [Number.MAX_VALUE]), [1]);
+    // The guards are SIGN-SYMMETRIC (r4 Sol F2–F4): ordinary negative
+    // prices compute their negative average verbatim…
+    assert.deepEqual(vwap([-10, -20], [-10, -20], [-10, -20], [1, 1]), [-10, -15]);
+    // …a NEGATIVE subnormal contribution is refused like a positive one
+    // (an hlc3 > 0 mutant would silently return [-2] for hlc3 -1.5)…
+    assert.throws(
+      () => vwap([-1.5], [-1.5], [-1.5], [Number.MIN_VALUE]),
+      { message: /vwap: contribution is below the normal floating-point range/ },
+    );
+    // …and overflow to -Infinity is refused like +Infinity (an
+    // === Infinity comparison would let it serialize as JSON null).
+    assert.throws(
+      () => vwap([-2], [-2], [-2], [Number.MAX_VALUE]),
+      { message: /vwap: cumulative sums are no longer finite/ },
+    );
+  });
   it('a zero-volume bar\'s PRICES are never read — an overflowing hlc3 there cannot poison the sums (r3 Sol F2)', () => {
     // (M+M+M)/3 = Infinity, and Infinity × 0 = NaN: before the fix this
     // threw the sums guard; the contract requires the volume-0 bar to
@@ -392,6 +419,16 @@ describe('core — vwap through getIndicator', () => {
     const r = await getIndicator({ indicator: 'vwap', _deps: { getOhlcv } });
     assert.equal(r.series.value[1], (10 + 20 * 2) / 3, 'any rounding layer in the dispatch breaks bit-exactness');
   });
+  it('a legitimate VWAP of exactly 0 is a VALUE, never miscounted as a zero-volume null (r4 Sol F6)', async () => {
+    // A `!v` null-check mutant counts the falsy value 0 as a null; the
+    // D4 count must stay 0 while the series carries [0, 5].
+    const bars = [vbar(1, 0, 1), vbar(2, 10, 1)];
+    const { getOhlcv } = stubOhlcv(bars, oneMinute);
+    const r = await getIndicator({ indicator: 'vwap', _deps: { getOhlcv } });
+    assert.deepEqual(r.series.value, [0, 5]);
+    assert.equal(r.metadata.zero_volume_nulls_total, 0, 'the value 0 is not a null');
+    assert.equal(r.metadata.warmup_nulls_total, 0);
+  });
   it('zero_volume_nulls_total counts NULL POINTS, not zero-volume bars (r3 Sol F5)', async () => {
     // An interior zero-volume bar produces NO null (the value repeats) —
     // a count-the-zero-volume-bars mutant reports 1 here.
@@ -429,6 +466,12 @@ describe('data — same-snapshot resolution stays out of the public shape', () =
     assert.equal('resolution' in raw, false, 'the public non-summary shape must not grow a resolution field (D2 containment)');
     const summary = await getOhlcv({ summary: true, _deps: { evaluate: page('5') } });
     assert.equal('resolution' in summary, false, 'the public summary shape must not grow a resolution field (D2 containment)');
+    // Containment holds at the CANONICAL resolution too (r4 Sol F9): a
+    // leak conditioned on "1" would pass the "5" pins above.
+    const rawOne = await getOhlcv({ summary: false, _deps: { evaluate: page('1') } });
+    assert.equal('resolution' in rawOne, false, 'containment must not leak specifically on a 1-minute chart');
+    const summaryOne = await getOhlcv({ summary: true, _deps: { evaluate: page('1') } });
+    assert.equal('resolution' in summaryOne, false);
   });
   it('includeResolution: true carries the same-snapshot resolution to the internal caller', async () => {
     const raw = await getOhlcv({ summary: false, includeResolution: true, _deps: { evaluate: page('1') } });
@@ -471,12 +514,14 @@ describe('data — same-snapshot resolution stays out of the public shape', () =
   // object-stub tests (r1 Luna F1 lesson) — so these fixtures run the
   // snippet against a fake `window` shaped like the known paths.
   const THROWING_RESOLUTION = Symbol('resolution() throws');
-  function snippetPage(resolutionValue) {
+  function snippetPage(resolutionValue, rows = [[1, 10, 10, 10, 10, 5]]) {
+    // rows are raw page tuples [time, o, h, l, c, volume] — the shape
+    // the snippet's mk() consumes.
     const fakeBars = {
       firstIndex: () => 0,
-      lastIndex: () => 0,
-      size: () => 1,
-      valueAt: () => [1, 10, 10, 10, 10, 5], // [time, o, h, l, c, volume]
+      lastIndex: () => rows.length - 1,
+      size: () => rows.length,
+      valueAt: (i) => rows[i],
     };
     const chart = {
       resolution: () => {
@@ -542,6 +587,24 @@ describe('data — same-snapshot resolution stays out of the public shape', () =
       () => getIndicator({ indicator: 'vwap', _deps: { getOhlcv: chained } }),
       { message: /exactly "1", got: null/ },
     );
+  });
+  it('the snippet\'s VOLUME COLUMN weights end-to-end — a multi-bar real-snippet run discriminates v[5] (r4 Sol F7)', async () => {
+    // Rows 10@1 and 20@3 → (10 + 60) / 4 = 17.5; a v[4]-as-volume mutant
+    // (close column) yields (10·10 + 20·20) / 30 instead.
+    const rows = [[1, 10, 10, 10, 10, 1], [2, 20, 20, 20, 20, 3]];
+    const chained = (args) => getOhlcv({ ...args, _deps: { evaluate: snippetPage('1', rows) } });
+    const r = await getIndicator({ indicator: 'vwap', _deps: { getOhlcv: chained } });
+    assert.deepEqual(r.series.value, [10, 17.5]);
+  });
+  it('the same-snapshot resolution rides the HISTORICAL mode too — a windowed real-snippet run computes (r4 Sol F8)', async () => {
+    // The windowed branch of the snippet must return the same
+    // resolution; a windowed→null mutant turns this into a got: null
+    // refusal.
+    const rows = [[1, 10, 10, 10, 10, 1], [2, 20, 20, 20, 20, 3]];
+    const chained = (args) => getOhlcv({ ...args, _deps: { evaluate: snippetPage('1', rows) } });
+    const r = await getIndicator({ indicator: 'vwap', from: 0, to: 3, _deps: { getOhlcv: chained } });
+    assert.equal(r.source.mode, 'window');
+    assert.deepEqual(r.series.value, [10, 17.5]);
   });
   it('a THROWING chart.resolution() fails CLOSED at the snippet layer — refused as null, never fail-open (r1 Sol F3)', async () => {
     // The snippet's try/catch must leave resolution null when the page API
