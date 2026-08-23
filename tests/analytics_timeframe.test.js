@@ -1,14 +1,16 @@
 /**
  * Issue #16 B+ amendment suite — deterministic 1m → 5m derivation.
  *
- * Owner amendment (2026-08-23, recorded verbatim on issue #16): the V1
- * canonical acquisition is validated 1-minute OHLCV; both completed 1-minute
- * and completed 5-minute analytics must derive from that single snapshot
- * without changing the chart resolution. Five-minute OHLC bars aggregate
- * deterministically from timestamp-aligned completed 1-minute bars;
- * five-minute VWAP derives from the canonical 1-minute price-volume
- * contributions, NEVER recomputed from aggregated 5-minute OHLC; incomplete
- * terminal buckets are not completed bars; retrieval caps unchanged.
+ * Owner amendment (2026-08-23, recorded verbatim on issue #16), with the
+ * owner's precision: "B+ derives 1-minute analytics from the canonical
+ * validated 1-minute snapshot and derives 5-minute analytics only from
+ * completed five-minute buckets. It does not independently assert
+ * completion of the terminal one-minute source bar." Five-minute OHLC
+ * bars aggregate deterministically from timestamp-aligned completed
+ * 1-minute bars; five-minute VWAP derives from the canonical 1-minute
+ * price-volume contributions, NEVER recomputed from aggregated 5-minute
+ * OHLC; incomplete terminal buckets are not completed bars; retrieval
+ * caps unchanged. No 1-minute completion heuristic exists — by ruling.
  *
  * Operative readings pinned here (documented in the amendment comment):
  *   - buckets are floor(time/300)×300; a present bucket is COMPLETED iff a
@@ -16,7 +18,10 @@
  *     the last (the terminal bucket can never prove its own completion);
  *   - the LEADING bucket is completed only when the window starts exactly
  *     on its boundary (a mid-bucket cut would fabricate a wrong 5m open);
- *   - exclusions are OBSERVABLE (excluded leading/terminal 1m-bar counts);
+ *   - boundary state is OBSERVABLE under NEUTRAL names (owner R3):
+ *     partial_leading_1m_bars / incomplete_terminal_1m_bars count
+ *     input-boundary bars, not participation — neither set enters derived
+ *     5m bars, but partial leading bars DO stay in the 5m VWAP fold;
  *   - `timeframe` on data_compute_indicator is a CLAIM: omitted = today's
  *     behavior byte-for-byte; present ('1' | '5') = the 1-minute canonical
  *     gate is enforced; '5' derives the completed-bucket series;
@@ -50,24 +55,24 @@ describe('partitionFiveMinuteBuckets — data-evidence completedness', () => {
       { start: 300, startIndex: 0, endIndex: 4 },
       { start: 600, startIndex: 5, endIndex: 6 },
     ]);
-    assert.equal(p.excludedLeading, 0);
-    assert.equal(p.excludedTerminal, 1, 'the bar at 900 sits in a bucket that cannot prove completion');
+    assert.equal(p.partialLeading, 0);
+    assert.equal(p.incompleteTerminal, 1, 'the bar at 900 sits in a bucket that cannot prove completion');
   });
   it('a window cut MID-bucket excludes the leading bucket — its 5m open/high/low would be fabricated', () => {
     const times = [360, 420, 600, 660, 900];
     const p = partitionFiveMinuteBuckets(times);
     assert.deepEqual(p.buckets, [{ start: 600, startIndex: 2, endIndex: 3 }]);
-    assert.equal(p.excludedLeading, 2);
-    assert.equal(p.excludedTerminal, 1);
+    assert.equal(p.partialLeading, 2);
+    assert.equal(p.incompleteTerminal, 1);
   });
   it('a single present bucket is terminal — never completed, never double-counted as leading', () => {
     const p = partitionFiveMinuteBuckets([0, 60]);
     assert.deepEqual(p.buckets, []);
-    assert.equal(p.excludedLeading, 0);
-    assert.equal(p.excludedTerminal, 2);
+    assert.equal(p.partialLeading, 0);
+    assert.equal(p.incompleteTerminal, 2);
   });
   it('an empty window partitions to nothing', () => {
-    assert.deepEqual(partitionFiveMinuteBuckets([]), { buckets: [], excludedLeading: 0, excludedTerminal: 0 });
+    assert.deepEqual(partitionFiveMinuteBuckets([]), { buckets: [], partialLeading: 0, incompleteTerminal: 0 });
   });
   it('gaps INSIDE a bucket are market reality, not a cut — the bucket still completes', () => {
     // bucket 300 holds only 300 and 540 (no trades between): completed
@@ -78,7 +83,7 @@ describe('partitionFiveMinuteBuckets — data-evidence completedness', () => {
   it('a bar exactly ON a boundary opens the NEXT bucket (half-open [start, start+300))', () => {
     const p = partitionFiveMinuteBuckets([0, 60, 300]);
     assert.deepEqual(p.buckets, [{ start: 0, startIndex: 0, endIndex: 1 }]);
-    assert.equal(p.excludedTerminal, 1);
+    assert.equal(p.incompleteTerminal, 1);
   });
   it('non-increasing or malformed times refuse loudly', () => {
     for (const bad of [[300, 300], [300, 240], [300, Number.NaN], [300, '360']]) {
@@ -104,8 +109,8 @@ describe('aggregateFiveMinute — deterministic OHLCV roll-up of completed bucke
       { time: 300, open: 10, high: 16, low: 8, close: 15, volume: 10 },
       { time: 600, open: 15, high: 25, low: 15, close: 25, volume: 4 },
     ]);
-    assert.equal(a.excludedLeading, 0);
-    assert.equal(a.excludedTerminal, 1);
+    assert.equal(a.partialLeading, 0);
+    assert.equal(a.incompleteTerminal, 1);
   });
   it('does not mutate its input', () => {
     const bars = [mbar(300, 1, 2, 0, 1, 1), mbar(600, 1, 2, 0, 1, 1)];
@@ -157,8 +162,8 @@ describe('core — timeframe "5": derived completed-bucket analytics', () => {
     assert.equal(r.timeframe, '5');
     assert.equal(r.metadata.total, 2);
     assert.equal(r.metadata.returned, 2);
-    assert.equal(r.metadata.excluded_leading_1m_bars, 0);
-    assert.equal(r.metadata.excluded_terminal_1m_bars, 1);
+    assert.equal(r.metadata.partial_leading_1m_bars, 0);
+    assert.equal(r.metadata.incomplete_terminal_1m_bars, 1);
     assert.equal(r.metadata.warmup_nulls_total, 0);
     assert.equal(r.metadata.zero_volume_nulls_total, 0);
     assert.equal('period' in r, false);
@@ -194,7 +199,7 @@ describe('core — timeframe "5": derived completed-bucket analytics', () => {
     assert.equal(r.timeframe, '5');
     assert.equal(r.period, 2, 'period counts FIVE-MINUTE bars');
     assert.equal(r.metadata.warmup_nulls_total, 1);
-    assert.equal(r.metadata.excluded_terminal_1m_bars, 1);
+    assert.equal(r.metadata.incomplete_terminal_1m_bars, 1);
     assert.equal('zero_volume_nulls_total' in r.metadata, false);
   });
   it('donchian@5m keeps its three-channel shape over derived bars', async () => {
@@ -217,6 +222,41 @@ describe('core — timeframe "5": derived completed-bucket analytics', () => {
     assert.deepEqual(r.series.value, [23.5], '23.5 is window-anchored; a tail-anchored recomputation would return 40');
     assert.deepEqual({ total: r.metadata.total, returned: r.metadata.returned, truncated: r.metadata.truncated }, { total: 2, returned: 1, truncated: true });
   });
+  it('partial leading 1m bars stay in the 5m VWAP fold — the neutral name is earned, not cosmetic (owner R3)', async () => {
+    // Window cut mid-bucket: bucket 300 is partial (bars at 360, 420) and
+    // produces NO derived 5m bar, but its bars still seed the canonical
+    // window-start anchor. Stream: 6/1, 24/2, 84/4, 124/8 = 15.5 —
+    // sampled at completed bucket 600's end. A fold that dropped the
+    // partial bars would answer (60+40)/6 instead.
+    const bars = [vbar(360, 6, 1), vbar(420, 18, 1), vbar(600, 30, 2), vbar(660, 10, 4), vbar(900, 999, 7)];
+    const { getOhlcv } = stubOhlcv(bars, oneMinute);
+    const r = await getIndicator({ indicator: 'vwap', timeframe: '5', _deps: { getOhlcv } });
+    assert.deepEqual(r.times, [600]);
+    assert.deepEqual(r.series.value, [15.5]);
+    assert.equal(r.metadata.partial_leading_1m_bars, 2);
+    assert.equal(r.metadata.incomplete_terminal_1m_bars, 1);
+  });
+  it('vwap + timeframe "1": legacy 1m values, enforced claim, echo — and no derivation fields (owner pre-review fixture)', async () => {
+    const bars = [vbar(1, 10, 1), vbar(2, 20, 1), vbar(3, 40, 2)];
+    const { getOhlcv } = stubOhlcv(bars, oneMinute);
+    const claimed = await getIndicator({ indicator: 'vwap', timeframe: '1', _deps: { getOhlcv } });
+    const legacy = await getIndicator({ indicator: 'vwap', _deps: { getOhlcv } });
+    assert.deepEqual(claimed.series.value, legacy.series.value);
+    assert.deepEqual(claimed.series.value, [10, 15, 27.5]);
+    assert.deepEqual(claimed.times, legacy.times);
+    assert.equal(claimed.timeframe, '1');
+    assert.equal('period' in claimed, false);
+    assert.equal(claimed.metadata.warmup_nulls_total, 0);
+    assert.equal(claimed.metadata.zero_volume_nulls_total, 0);
+    assert.equal('partial_leading_1m_bars' in claimed.metadata, false, '"1" derives nothing — no boundary fields');
+    // The claim stays enforced on this combination too: an unestablished
+    // resolution refuses with vwap's own unchanged message.
+    const { getOhlcv: ungated } = stubOhlcv(bars); // no resolution field
+    await assert.rejects(
+      () => getIndicator({ indicator: 'vwap', timeframe: '1', _deps: { getOhlcv: ungated } }),
+      { message: /vwap requires the chart at 1-minute resolution/ },
+    );
+  });
   it('zero completed buckets is a well-formed empty derivation, not an error', async () => {
     const bars = [vbar(0, 10, 1), vbar(60, 20, 1)];
     const { getOhlcv } = stubOhlcv(bars, oneMinute);
@@ -224,7 +264,7 @@ describe('core — timeframe "5": derived completed-bucket analytics', () => {
     assert.deepEqual(r.series.value, []);
     assert.deepEqual(r.times, []);
     assert.equal(r.metadata.total, 0);
-    assert.equal(r.metadata.excluded_terminal_1m_bars, 2);
+    assert.equal(r.metadata.incomplete_terminal_1m_bars, 2);
   });
 });
 
@@ -264,7 +304,7 @@ describe('core — the timeframe CLAIM is enforced; omission stays legacy', () =
     const r = await getIndicator({ indicator: 'sma', period: 1, _deps: { getOhlcv } });
     assert.equal(r.success, true);
     assert.equal('timeframe' in r, false, 'no claim, no echo');
-    assert.equal('excluded_terminal_1m_bars' in r.metadata, false);
+    assert.equal('incomplete_terminal_1m_bars' in r.metadata, false);
   });
   it('timeframe "1" computes the same values as omitted — plus the enforced claim and the echo', async () => {
     const bars = [mbar(1, 10, 11, 9, 10, 1), mbar(2, 11, 12, 10, 11, 1), mbar(3, 12, 13, 11, 12, 1)];
@@ -274,7 +314,7 @@ describe('core — the timeframe CLAIM is enforced; omission stays legacy', () =
     assert.deepEqual(claimed.series, legacy.series);
     assert.deepEqual(claimed.times, legacy.times);
     assert.equal(claimed.timeframe, '1');
-    assert.equal('excluded_terminal_1m_bars' in claimed.metadata, false, '"1" derives nothing — no exclusion fields');
+    assert.equal('incomplete_terminal_1m_bars' in claimed.metadata, false, '"1" derives nothing — no exclusion fields');
   });
   it('a direct-core timeframe outside the enum refuses loudly (the served schema is the first belt)', async () => {
     const { getOhlcv } = stubOhlcv([vbar(0, 10, 1)], oneMinute);

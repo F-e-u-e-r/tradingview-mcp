@@ -368,7 +368,7 @@ describe('served seam — successful calls through the registered handler', () =
       assert.equal(r.timeframe, '5');
       assert.deepEqual(r.times, [0, 300]);
       assert.deepEqual(r.series.value, [7, 23.5]);
-      assert.equal(r.metadata.excluded_terminal_1m_bars, 1);
+      assert.equal(r.metadata.incomplete_terminal_1m_bars, 1);
       const smaRes = await lClient.callTool({ name: 'data_compute_indicator', arguments: { indicator: 'sma', period: 1, timeframe: '5' } });
       assert.ok(!smaRes.isError);
       const s = JSON.parse(smaRes.content[0].text);

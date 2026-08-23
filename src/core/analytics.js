@@ -40,8 +40,20 @@
  * '5' derives completed five-minute analytics — aggregated bars into the
  * UNCHANGED A1 kernels, and for vwap a bucket-end SAMPLING of the
  * canonical 1-minute contribution stream (never a recompute from 5m
- * OHLC). Exclusions of incomplete leading/terminal buckets are reported
- * observably in metadata.
+ * OHLC). Boundary state is reported observably under NEUTRAL names
+ * (owner R3 amendment): partial_leading_1m_bars /
+ * incomplete_terminal_1m_bars describe input-boundary state, not
+ * participation — partial leading 1m bars stay in the 5m VWAP fold (the
+ * window-start anchor) while never entering derived 5m bars; incomplete
+ * terminal bars enter neither.
+ *
+ * Owner amendment precision (2026-08-23, verbatim): "B+ derives 1-minute
+ * analytics from the canonical validated 1-minute snapshot and derives
+ * 5-minute analytics only from completed five-minute buckets. It does
+ * not independently assert completion of the terminal one-minute source
+ * bar." — timeframe '1' is snapshot analytics, deliberately WITHOUT a
+ * 1-minute completion heuristic; only the derived '5' path enforces
+ * completed-bucket semantics.
  */
 import { getOhlcv as _getOhlcv } from './data.js';
 import { sma, ema, rsi, atr, donchian } from '../analytics/indicators.js';
@@ -211,10 +223,14 @@ export async function getIndicator({ indicator, period, count, from, to, last, t
       // vwap-only (D4): its nulls are "cumulative volume still zero", not
       // warm-up. The field appears on NO other indicator's response.
       ...(isVwap ? { zero_volume_nulls_total: nullsTotal } : {}),
-      // B+ observable exclusions ("exclusion MUST be observable" — the
-      // BT0 §4.7 lineage): 1m bars dropped from the derivation at each
-      // edge. Present only in derived mode.
-      ...(derived ? { excluded_leading_1m_bars: derived.excludedLeading, excluded_terminal_1m_bars: derived.excludedTerminal } : {}),
+      // B+ observable boundary state ("exclusion MUST be observable" —
+      // BT0 §4.7 lineage), NEUTRAL names by owner R3 amendment: these
+      // count 1m bars in a partial leading / incomplete terminal bucket,
+      // describing the INPUT boundary, not participation — neither set
+      // enters derived 5m BARS, but partial leading bars DO stay in the
+      // 5m VWAP fold (window-start anchor) while incomplete terminal
+      // bars never enter it. Present only in derived mode.
+      ...(derived ? { partial_leading_1m_bars: derived.partialLeading, incomplete_terminal_1m_bars: derived.incompleteTerminal } : {}),
     },
     times: slice(outTimes),
     series: outSeries,

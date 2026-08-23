@@ -7,10 +7,10 @@
  * inputs → outputs; inputs are never mutated. Owner-specified semantics
  * (the amendment recorded verbatim on issue #16) — NOT donor-ported.
  *
- * SEMANTICS: 1-minute bars partition into timestamp-aligned five-minute
- * buckets, `floor(time / 300) × 300` — Unix-aligned, timezone-independent
- * (every real UTC offset is a multiple of 900s), calendar-free. Bucket
- * membership is half-open: [start, start + 300).
+ * SEMANTICS: 1-minute bars partition into five-minute buckets,
+ * Unix-epoch aligned using `floor(time / 300) × 300`; session/calendar-
+ * specific alignment is outside V1 (owner ruling). Bucket membership is
+ * half-open: [start, start + 300).
  *
  * COMPLETEDNESS is established from DATA, never a clock (the BT0 §4.7
  * epistemic lineage): a present bucket is completed iff a LATER bucket has
@@ -21,8 +21,14 @@
  * window starts exactly on its boundary (first time === bucket start):
  * a mid-bucket window cut is indistinguishable from data alone from a
  * no-trade gap at the bucket's open, and aggregating it would fabricate a
- * silently wrong 5m open/high/low. Exclusions are OBSERVABLE — both
- * counts are returned and the orchestration reports them.
+ * silently wrong 5m open/high/low. Both boundary states are OBSERVABLE —
+ * the counts are returned and the orchestration reports them under
+ * NEUTRAL names (owner R3 amendment): `partialLeading` /
+ * `incompleteTerminal` describe the INPUT-BOUNDARY state, never
+ * participation, because participation differs by path — neither set
+ * enters the derived 5m BARS, but the partial leading 1m bars DO stay in
+ * the five-minute VWAP's cumulative fold (the window-start anchor),
+ * while incomplete terminal bars never enter that fold at all.
  *
  * Gaps INSIDE a bucket are market reality (no trades that minute), not a
  * cut: the bucket still aggregates from the bars that exist.
@@ -62,7 +68,7 @@ function requireStrictlyIncreasingTimes(name, times) {
  * Partition strictly-increasing 1m bar times into five-minute buckets and
  * decide completedness from data evidence.
  *
- * Returns { buckets, excludedLeading, excludedTerminal }: `buckets` holds
+ * Returns { buckets, partialLeading, incompleteTerminal }: `buckets` holds
  * the COMPLETED buckets only, ascending, as
  * { start, startIndex, endIndex } (inclusive index range into `times`);
  * the exclusion counts are 1m bars dropped at each edge (a single present
@@ -79,23 +85,23 @@ export function partitionFiveMinuteBuckets(times) {
       present.push({ start, startIndex: i, endIndex: i });
     }
   }
-  if (present.length === 0) return { buckets: [], excludedLeading: 0, excludedTerminal: 0 };
+  if (present.length === 0) return { buckets: [], partialLeading: 0, incompleteTerminal: 0 };
 
   const terminal = present[present.length - 1];
-  const excludedTerminal = terminal.endIndex - terminal.startIndex + 1;
+  const incompleteTerminal = terminal.endIndex - terminal.startIndex + 1;
   let completed = present.slice(0, -1);
-  let excludedLeading = 0;
+  let partialLeading = 0;
   if (completed.length && times[completed[0].startIndex] !== completed[0].start) {
     // The window opens mid-bucket: its 5m open/high/low cannot be trusted.
-    excludedLeading = completed[0].endIndex - completed[0].startIndex + 1;
+    partialLeading = completed[0].endIndex - completed[0].startIndex + 1;
     completed = completed.slice(1);
   }
-  return { buckets: completed, excludedLeading, excludedTerminal };
+  return { buckets: completed, partialLeading, incompleteTerminal };
 }
 
 /**
  * Aggregate validated 1m OHLCV bars into completed five-minute bars.
- * Returns { bars, excludedLeading, excludedTerminal } — `bars` are the
+ * Returns { bars, partialLeading, incompleteTerminal } — `bars` are the
  * derived completed 5m bars, shaped exactly like the 1m records the A1
  * column extraction consumes.
  */
@@ -123,5 +129,5 @@ export function aggregateFiveMinute(bars) {
       volume,
     });
   }
-  return { bars: out, excludedLeading: partition.excludedLeading, excludedTerminal: partition.excludedTerminal };
+  return { bars: out, partialLeading: partition.partialLeading, incompleteTerminal: partition.incompleteTerminal };
 }
