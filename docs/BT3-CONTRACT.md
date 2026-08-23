@@ -1,8 +1,10 @@
 # BT3 — Performance metrics contract (V1)
 
-**Status:** design-only proposal for owner adjudication. **Zero product
-code.** BT3 implementation opens only after this document is ratified; the
-decision points in §8 are the owner's to adjudicate.
+**Status:** owner-adjudicated 2026-08-24 — **APPROVED-WITH-AMENDMENTS**
+(§1.5); this revision incorporates the amendments. **Zero product code.**
+Ratification lands by merging the docs-only PR (CI1 + CI2 provenance
+gate); BT3 implementation opens only after that merge. No decision point
+in §8 remains open.
 
 **Base:** `main @ 0320d4b0f884eab3ec426b840e51f361c150e8ca` — BT0 contract
 ratified (`438a59e`), BT1 kernel CLOSED (`0d07902`), BT2 contract ratified
@@ -84,6 +86,29 @@ input. Facts BT3 relies on, all guaranteed by the ratified BT2 contract:
   already binds the successor: **"No force-close, ever (BT3 must not
   force one either)."**
 
+### 1.5 Adjudication record (owner, 2026-08-24)
+
+Owner decision, verbatim:
+
+> **BT3 contract semantics APPROVED-WITH-AMENDMENTS. Ratify D1, D2, D3,
+> D4, D5, D6, D7, D7a and D8 as specified above; change D3a to
+> `winningTrades / closedTrades`; seed max-drawdown running peak with
+> `initialCash`; refine profit-factor reason tokens to distinguish zero
+> closed trades, breakeven-only closed trades, and no-loss histories;
+> retain whole-call typed failure for representationally non-finite
+> derived metrics; and weaken the “signature proves purity” wording to
+> the actual consumed-field allowlist contract.**
+
+Process rulings attached to the same decision: no Sol/Luna review of the
+contract is required before ratification (the adjudicated amendments are
+written back into this document, then the docs-only PR is opened);
+implementation and model review stay closed until the ratification
+merge; the draft-session process notes (an early piped-exit-code
+misread, corrected in-session; the main-checkout branch switch by an
+actor outside the session) are RESOLVED / RECORD-only — no blocker, no
+follow-up investigation. §8 records the per-point rulings; §5 carries
+the amended normative text.
+
 ---
 
 ## 2. Architecture
@@ -101,10 +126,12 @@ bars ──▶ BT1 kernel (CLOSED) ──▶ execution result
 - New pure module (conceptually `src/analytics/metrics.js`), same
   zero-capability class as A1/BT1/BT2: no imports, no clock, no
   randomness, no I/O, no mutation of inputs, no mutable module state.
-- **Single argument** — the BT2 result object. The signature itself
-  enforces the §1.2 purity rule: with no bars, no BT1 result, and no cost
-  parameters in scope, the metrics layer *cannot* reconstruct fills,
-  positions, costs, or equity.
+- **Single argument** — the BT2 result object. Containment wording
+  (owner amendment, 2026-08-24, verbatim): "The single-argument signature
+  constrains BT3 to the authoritative BT2 accounting object; purity is
+  enforced by the normative consumed-field allowlist in §2.2 and by
+  tests that reject access to fields outside that contract. The
+  signature alone is not treated as proof of non-reconstruction."
 - `src/analytics/indicators.js`, `backtest.js`, `accounting.js` stay
   byte-untouched. The hash-pin discipline extends: BT3's tests sha256-pin
   `accounting.js` exactly as BT2's tests pin `backtest.js` and BT1's pin
@@ -123,20 +150,21 @@ The metrics layer may only:
 3. **apply the §5 metric formulas** to BT2-reported values
    (`totalReturn`, `netPnl`, `winRate`, `maxDrawdown`, `profitFactor`).
 
-It must never re-derive a BT2-reported value from other BT2 fields — in
-particular it must **not** re-sum `closedTradePnl[]` to obtain
-`realizedPnlTotal` (BT2 reports that total; a binary64 re-summation could
-differ in rounding and would be a second accounting truth), must not
+It must never re-derive a BT2-reported value from other BT2 fields.
+Owner ruling (D2, verbatim): **"BT3 must not re-sum executions or closed
+trades to derive `realizedPnlTotal`."** (BT2 reports that total; a
+binary64 re-summation could differ in rounding and would be a second
+accounting truth.) Likewise it must not
 recompute `unrealizedPnl` from `markedValue − entryCost`, must not check
 `finalEquity` against `equitySeries`, and must not rebuild any equity,
 position, cost, or fill quantity from `ledger` (which it does not read at
 all).
 
-### 2.2 Fields consumed (exhaustive)
+### 2.2 Consumed-field allowlist (normative, exhaustive)
 
 | BT2 field | used by |
 |---|---|
-| `initialCash` | totalReturn |
+| `initialCash` | totalReturn; maxDrawdown (the D4 peak seed) |
 | `finalEquity` | totalReturn |
 | `realizedPnlTotal` | realizedPnlTotal (copy), netPnl |
 | `closedTradePnl[]` — each element's `realizedPnl`, array order/length | counts, winRate, profitFactor |
@@ -145,7 +173,11 @@ all).
 
 `ledger`, `finalCash`, `assumptions`, and the other
 `openPositionAccounting` fields (`quantity`, `entryCost`, `markPrice`,
-`markedValue`) are **not consumed** and not validated (§3).
+`markedValue`) are **not consumed** and not validated (§3). This
+allowlist is the enforcement surface of the §1.2 purity rule (owner
+amendment, §1.5): the implementation reads no field outside it, and
+BT3's tests must reject access to fields outside this contract — an
+out-of-allowlist read is a contract violation, not a style issue.
 
 ---
 
@@ -194,9 +226,11 @@ module's.
   `realizedPnl`; `grossLossTotal` = sum of losing trades' `realizedPnl`
   (≤ 0); each accumulated in `closedTradePnl` order as raw doubles;
   breakeven trades contribute to neither. Empty sums are 0.
-- **Running peak (D4).** Over `equitySeries` in order:
-  `peak[t] = max(equitySeries[0..t])`. On genuine BT2 output every peak
-  is ≥ `equitySeries[0] = initialCash > 0` (§1.4), so the D4 quotient's
+- **Running peak (D4, as amended).** Seeded at `initialCash` — owner
+  amendment, verbatim: "Initial capital is the time-zero equity anchor
+  for drawdown." — then folded over `equitySeries` in order:
+  `peak[t] = max(initialCash, equitySeries[0..t])`. Every peak is
+  therefore ≥ `initialCash > 0` unconditionally, so the D4 quotient's
   denominator is strictly positive.
 - **Reason token.** A closed vocabulary string explaining exactly why a
   nullable metric is null (§5.4/§5.6, D8). A metric's reason field is
@@ -222,10 +256,11 @@ winningTrades        §5.4   integer ≥ 0
 losingTrades         §5.4   integer ≥ 0
 breakevenTrades      §5.4   integer ≥ 0
 winRate              §5.4   number in [0,1] | null
-winRateReason        §5.4   null | 'no_directional_closed_trades'
+winRateReason        §5.4   null | 'insufficient_closed_trades'
 maxDrawdown          §5.5   finite number ≥ 0
 profitFactor         §5.6   number ≥ 0 | null
-profitFactorReason   §5.6   null | 'no_losses' | 'insufficient_closed_trades'
+profitFactorReason   §5.6   null | 'no_losses' | 'no_directional_closed_trades'
+                            | 'insufficient_closed_trades'
 ```
 
 Structural invariants (testable): the count identity (§4);
@@ -265,39 +300,60 @@ module contains no tolerance machinery and does not compare the two.
 
 ### 5.4 Trade classification and win rate (D3)
 
-Counts per §4's classification. Then:
+Counts per §4's classification. Then (D3a, **as ruled by the owner
+2026-08-24** — this supersedes the draft's directional-denominator
+candidate):
 
 ```text
-winRate := winningTrades / (winningTrades + losingTrades)   if winningTrades + losingTrades > 0
-        := null, winRateReason 'no_directional_closed_trades'   otherwise
+winRate := winningTrades / closedTrades                          if closedTrades > 0
+        := null, winRateReason 'insufficient_closed_trades'      otherwise
 ```
 
-Breakeven trades are excluded from both numerator and denominator: a
-breakeven has no directional outcome, so it neither damages nor inflates
-the hit rate (candidate rule — the alternative
-`winningTrades / closedTrades` is decision point **D3a**; fixture MF6
-discriminates: 0.5 vs 1/3). The counts are small integers (≤ 250 closed
-trades under the ≤ 500-bar contract), so the quotient is exact-operand
-correct rounding into `[0, 1]`.
+The plain name `winRate` carries its most natural, least surprising
+reading: wins over **all** closed trades. A breakeven is "not a win", so
+it lowers the plain win rate; excluding breakevens from the denominator
+answers a different question — the win rate **among directional
+outcomes** — which, if it is ever wanted, enters as a separate future
+metric `directionalWinRate = wins / (wins + losses)` (§6 Later list),
+never as a redefinition of `winRate`. Consequences, all binding:
+`closedTrades > 0` → a finite number in `[0, 1]`; a breakeven-only
+history → `winRate = 0` with reason `null` (a valid measured zero — the
+§4 null-semantics principle); `winRate` is `null` **only** when
+`closedTrades === 0`. Fixture MF6 pins the ruled value `1/3` (the
+rejected candidate would have read 0.5); MF5 pins the breakeven-only
+zero. The counts are small integers (≤ 250 closed trades under the
+≤ 500-bar contract), so the quotient is exact-operand correct rounding
+into `[0, 1]`.
 
 ### 5.5 Maximum drawdown (D4)
 
 **Max peak-to-trough percentage drawdown over the BT2 authoritative
-equity series** — the only equity series there is (§1.2). Operative
-fold, written order, over `equitySeries`:
+equity series** — the only equity series there is (§1.2) — with the
+running peak **seeded at `initialCash`** (owner amendment, verbatim:
+"Initial capital is the time-zero equity anchor for drawdown.").
+Operative fold, written order:
 
 ```text
-maxDrawdown := 0;  peak := (none)
-for each sample E in order:
-    peak := max(peak, E)            (first sample initializes peak)
+maxDrawdown := 0;  peak := initialCash          (the time-zero anchor — D4 amendment)
+for each sample E in equitySeries, in order:
+    peak := max(peak, E)
     dd   := (peak − E) / peak
     maxDrawdown := max(maxDrawdown, dd)
 ```
 
+The anchor is what makes a first sample **below** initial capital a
+measured drawdown instead of a silently re-based peak. Under BT1 V1
+execution timing the earliest fill is bar 2, so genuine chain output
+always has `equitySeries[0] = initialCash` (BT2 §5.1) and the seed
+coincides with the first sample; the anchor is nonetheless normative at
+the metrics boundary, and fixture MF12 pins it directly. It is still a
+pure projection: `initialCash` is a BT2-reported field on the §2.2
+allowlist — no equity is reconstructed.
+
 Reported as a **non-negative fraction** (`0.10` = a 10% drawdown, never
 `−0.10`). An empty series (`N = 0`) yields 0 by construction — no
 samples, no drawdown. A series that never trades, or never falls below
-its running peak, yields exactly 0. Because the series is BT2's, the
+its anchored running peak, yields exactly 0. Because the series is BT2's, the
 metric automatically sees cost-induced equity declines (MF9) and
 open-position mark-to-market declines (MF7/MF8) — and never sees a
 fabricated liquidation, because BT2 never fabricates one. Drawdown is
@@ -306,29 +362,39 @@ fabricated liquidation, because BT2 never fabricates one. Drawdown is
 ### 5.6 Profit factor (D5)
 
 Closed trades only, after costs, per §4's gross sums. The case rule is
-**structural — decided by counts, never by inspecting an arithmetic
-result**:
+**structural — decided by counts before any division, never by
+inspecting an arithmetic result** (owner ruling: PF's null must be
+decided by structural conditions before the division). With the owner's
+2026-08-24 reason-token refinement, the no-loss side splits three ways —
+zero closed trades, breakeven-only closed trades, and no-loss histories
+each carry their own token:
 
 ```text
-if losingTrades === 0:
-    profitFactor := null
-    profitFactorReason := winningTrades > 0 ? 'no_losses'
-                                            : 'insufficient_closed_trades'
-else:
+if losingTrades > 0:
     profitFactor := grossProfitTotal / (−grossLossTotal)     (written order)
     profitFactorReason := null
+else if winningTrades > 0:                    (wins, no losses)
+    profitFactor := null;  profitFactorReason := 'no_losses'
+else if closedTrades > 0:                     (closed trades, all breakeven)
+    profitFactor := null;  profitFactorReason := 'no_directional_closed_trades'
+else:                                         (no closed trades at all)
+    profitFactor := null;  profitFactorReason := 'insufficient_closed_trades'
 ```
 
-This reproduces the owner's edge grid exactly:
+The refined grid:
 
 | case | result |
 |---|---|
 | wins > 0 and losses > 0 | finite positive ratio |
 | wins = 0, losses > 0 | `0` (a measured zero: nothing made, something lost) |
 | wins > 0, losses = 0 | `null` + `'no_losses'` (undefined/unbounded — **not** a number, **not** Infinity) |
-| no closed trades at all | `null` + `'insufficient_closed_trades'` |
-| breakeven-only closed trades | `null` + `'insufficient_closed_trades'` (never `0/0`) |
+| closedTrades > 0, all breakeven | `null` + `'no_directional_closed_trades'` (never `0/0` — closed trades exist, but none carries the directional P&L a PF needs) |
+| closedTrades = 0 | `null` + `'insufficient_closed_trades'` |
 | a semantically-defined case whose binary64 evaluation is non-finite | fail loud per §5.7 — never a silent `null` via serialization |
+
+The three tokens now have disjoint, individually explainable product
+meanings (owner: honester than calling a breakeven-only history
+"insufficient" — the trades exist; what is missing is directional P&L).
 
 The distinction "undefined because the denominator is empty" ≠ "profit
 factor = 0" is load-bearing and survives any D8 reshaping of the JSON.
@@ -351,12 +417,24 @@ Binding rules:
 2. **Nulls are structural.** Whether a metric is null is decided by
    counts and null-ness of BT2 fields (§5.4/§5.6), never by computing a
    quotient and checking what came out.
-3. **R-FIN guard.** A metric that is semantically defined but whose
-   operative binary64 evaluation (including its intermediate sums) is
-   non-finite **fails loud with a typed error naming the metric** — the
-   BT2 §3 guard doctrine extended to the metrics layer (candidate rule;
-   the alternative — per-metric `null` with a `'non_representable'`
-   reason — is decision point **D7a**).
+3. **R-FIN guard (D7a, ratified 2026-08-24).** A metric that is
+   semantically defined but whose operative binary64 evaluation
+   (including its intermediate sums) is non-finite **fails loud with a
+   typed error for the whole `computeBacktestMetrics()` call** — the BT2
+   §3 guard doctrine extended to the metrics layer. The owner-ruled
+   requirement, verbatim: "If an arithmetic operation required by a BT3
+   metric produces a non-finite result from otherwise valid finite BT2
+   inputs, throw a typed error naming the metric/stage." (For example:
+   metric `netPnl`, reason `non_finite_result`.) The exact error
+   spelling narrows at implementation; no per-field
+   `{value, reason: 'non_representable'}` result union exists. Owner
+   rationale, recorded: this is not the `no_losses` kind of null — the
+   semantics are defined, only the representation failed, and a
+   partially non-representable report whose fields carry cross
+   invariants (netPnl, totalReturn, the final-equity relation,
+   realized/unrealized) invites consumer misuse; failing whole-call
+   continues BT2's ratified non-finite-intermediate → fail-loud
+   doctrine.
 4. **No tolerance machinery in product code.** The BT2 comparator stays
    verification-side (§5.3); BT3 introduces no epsilon, no clamp, no
    widened arithmetic in the product module.
@@ -364,26 +442,35 @@ Binding rules:
 **Pre-registered reachability (honesty about №3).** BT2's guards bound
 every *input* to finiteness but not the metrics' derived arithmetic:
 
-- `grossProfitTotal` can overflow on a valid ledger — alternating
-  huge-win/huge-loss round trips of magnitude ~`MAX_VALUE/2` each keep
-  every BT2 value finite while the same-sign partial sums grow without
-  the telescoping that protects BT2's `realizedPnlTotal` (the BT2-review
+- `totalReturn` is chain-reachably non-finite at extreme scale ratios —
+  a huge `finalEquity` over a tiny (in-domain) `initialCash`. Fixture
+  **MF13** pins this class executably: valid, fully guarded BT2 output
+  whose `totalReturn` evaluation overflows, expected outcome the D7a
+  typed error.
+- `grossProfitTotal` / `grossLossTotal` can overflow in principle on a
+  valid ledger — repeated ~`MAX_VALUE/2`-scale round trips keep every
+  BT2 value finite while the same-sign partial sums grow without the
+  telescoping that protects BT2's `realizedPnlTotal` (the BT2-review
   refutation of that overflow claim rests on telescoping; per-sign sums
-  do not telescope, so BT3 cannot inherit it and takes the R-FIN guard
-  instead — this is also why `realizedPnlTotal` is copied, never
-  re-summed);
-- `netPnl` can overflow on BT2's own round-3 extreme-value trace
-  (`realizedPnlTotal ≈ MAX_VALUE/2`, `unrealizedPnl = MAX_VALUE`): on
-  that documented input, BT3 faults loud under the candidate rule;
-- `totalReturn` can overflow only at pathological scale ratios
-  (`finalEquity` near `MAX_VALUE` with `initialCash` near the subnormal
-  floor).
+  do not inherit it — also why `realizedPnlTotal` is copied, never
+  re-summed). No fixture; the R-FIN guard covers it.
+- `netPnl` is **not credibly reachable** — a correction of this
+  document's pre-adjudication draft, found while constructing MF13: in
+  exact real arithmetic `netPnl` telescopes to `markedValue −
+  initialCash` when a position is open (and `finalCash − initialCash`
+  when flat), both bounded by `MAX_VALUE`; overflow would need ULP-drift
+  accumulation at `MAX_VALUE` scale across many trades. (The draft's
+  claim that BT2's round-3 extreme trace overflows `netPnl` was wrong:
+  that trace's `realizedPnlTotal = fl(B−A)` is *negative* — `B ≪ A` —
+  so its `netPnl ≈ +MAX_VALUE/2`, finite.) The R-FIN guard covers the
+  class regardless.
 
-All are astronomically beyond market data; none is reachable on any §7
-fixture. Per §1.3's proportional-review rule, a reviewer BLOCK on this
-axis must present a supported BT2 authoritative result producing an
-observable violation of one of these metric contracts — not further
-MAX_VALUE archaeology.
+These scales are astronomically beyond market data; MF13 makes the one
+practically constructible class executable, and nothing further is owed.
+Per §1.3's proportional-review rule, a reviewer BLOCK on this axis must
+present a supported BT2 authoritative result producing an observable
+violation of one of these metric contracts — not further MAX_VALUE /
+subnormal archaeology (owner: no mutation treadmill for this contract).
 
 ### 5.8 Per-metric availability (D6)
 
@@ -394,9 +481,9 @@ MAX_VALUE archaeology.
 | unrealizedPnl | always (0 when flat, BT2 §5.5) | 0 |
 | netPnl | always | 0 |
 | closedTrades / winningTrades / losingTrades / breakevenTrades | always | 0 — a valid measured count |
-| winRate | `winningTrades + losingTrades > 0` | — (`null` + reason otherwise) |
-| maxDrawdown | always (0 for empty or never-declining series) | 0 |
-| profitFactor | `losingTrades > 0` | — (`null` + reason otherwise; 0 when wins = 0 with losses present) |
+| winRate | `closedTrades > 0` (breakeven-only history → a measured `0`) | — (`null` + `'insufficient_closed_trades'` only when `closedTrades === 0`) |
+| maxDrawdown | always (0 for empty or never-below-anchor series) | 0 |
+| profitFactor | `losingTrades > 0` | — (reasoned `null` per §5.6 otherwise; 0 when wins = 0 with losses present) |
 | Sharpe | **not in BT3** (§6) | — |
 
 There is no generic "fewer than K trades ⇒ all null" rule; availability
@@ -418,7 +505,10 @@ is per-metric, per the §4 null-semantics principle.
   ground.
 - All other later metrics: CAGR, Sortino, Calmar, expectancy, exposure
   %, average trade, average win/loss, payoff ratio, consecutive
-  wins/losses, SQN, volatility — Later, each with its own adjudication.
+  wins/losses, SQN, volatility, and `directionalWinRate`
+  (`wins / (wins + losses)` — the D3a ruling keeps this out of the plain
+  `winRate`; if wanted it arrives as its own metric) — Later, each with
+  its own adjudication.
 - Force-closing terminal positions (BT2 §5.8 binds BT3 by name).
 - Reconstructing fills, positions, costs, or equity; re-running BT1/BT2;
   any second accounting truth (§1.2).
@@ -447,11 +537,16 @@ smallest, in MF7), many orders of magnitude above the ~1-ULP (~10⁻¹⁶
 relative) rounding of intermediate `dd` values — rounding can never
 change which samples attain the maximum.
 
-Every fixture below has been machine-verified **exactly** (strict `===`
-per field) over the CLOSED BT1+BT2 chain at this document's base SHA —
-execution trace, accounting values, and candidate metrics (campaign
-scratch checker `bt3-fixture-check.mjs`, `bt3-2026-08-24/`; the checker
-is verification tooling, not product code).
+Fourteen fixtures. Twelve (MF0–MF11, MF13) are **chain fixtures**,
+machine-verified **exactly** (strict `===` per field) over the CLOSED
+BT1+BT2 chain at this document's base SHA — execution trace, accounting
+values, and the adjudicated metric rules; MF13's pinned outcome is the
+§5.7 typed error. **MF12 is a direct rule fixture** verified at the
+metrics boundary (its rationale in place). Campaign scratch checker
+`bt3-fixture-check.mjs`, `bt3-2026-08-24/`; the checker is verification
+tooling, not product code. MF13's values are powers of two; its one
+inexact difference `fl(2¹⁰⁰ − 2⁻¹⁰⁰⁰) = 2¹⁰⁰` is pinned by the half-ULP
+argument in its section.
 
 Metric rows abbreviate: tR totalReturn, rT realizedPnlTotal, uP
 unrealizedPnl, nP netPnl, cT/w/l/be counts, wR winRate, mDD maxDrawdown,
@@ -464,18 +559,18 @@ BT2 §5.1 defines the empty run: `equitySeries = []`, `finalEquity =
 initialCash` (1000 here), `realizedPnlTotal = 0`, flat.
 
 **Metrics:** tR 0 (= (1000−1000)/1000), rT 0, uP 0, nP 0; cT/w/l/be
-0/0/0/0; wR null (ND); mDD 0 (empty fold); PF null (IC). Zero bars is a
-well-formed no-op end to end.
+0/0/0/0; wR null (IC); mDD 0 (empty fold over the anchored peak); PF
+null (IC). Zero bars is a well-formed no-op end to end.
 
 ### MF1 — no trades, flat equity (over ratified AF6 / BT0 F4)
 
 AF6: terminal entry signal never fills; costs present and unused (cash
 1000, r = s = 0.25); ledger empty; equity `[1000, 1000, 1000, 1000]`.
 
-**Metrics:** tR 0, rT 0, uP 0, nP 0; cT/w/l/be 0/0/0/0; wR null (ND);
-mDD 0 (flat series); PF null (IC). Identical metric values to MF0 with a
-different, well-formed cause — and the pending signal has no metric
-effect, exactly as it had no accounting effect.
+**Metrics:** tR 0, rT 0, uP 0, nP 0; cT/w/l/be 0/0/0/0; wR null (IC);
+mDD 0 (flat series at the anchor); PF null (IC). Identical metric values
+to MF0 with a different, well-formed cause — and the pending signal has
+no metric effect, exactly as it had no accounting effect.
 
 ### MF2 — one losing closed trade (over ratified AF1 / BT0 F1)
 
@@ -577,11 +672,14 @@ Accounting: qty = 1600/16 = **100**; exit proceeds 1600 → cash **1600**;
 realized = 1600 − 1600 = **exactly 0** (every product exact);
 `closedTradePnl = [0]`; equity flat `[1600 × 6]`.
 
-**Metrics:** tR 0, rT 0, uP 0, nP 0; cT/w/l/be **1/0/0/1**; wR **null +
-ND** (wins + losses = 0 — a closed trade exists, yet the hit rate is
-undefined, not 0 and not 1); mDD 0; PF **null + IC** (breakeven-only is
-the "never `0/0`" row of the D5 grid). Distinguished from MF1 solely by
-`closedTrades = 1` — the counts carry the difference, the nulls agree.
+**Metrics:** tR 0, rT 0, uP 0, nP 0; cT/w/l/be **1/0/0/1**; wR **0**
+with reason `null` (the D3a ruling: a closed trade exists and it was not
+a win — a valid measured zero, not a null); mDD 0; PF **null + ND** (the
+owner-refined token: closed trades exist, but none carries directional
+P&L — never `0/0`, and honestly distinct from "no closed trades").
+Distinguished from MF1 by `closedTrades = 1` **and** by `winRate` 0 vs
+null and the PF reason ND vs IC — the adjudicated refinements make the
+two histories observably different on three axes.
 
 ### MF6 — win + loss + breakeven (new trace WT4, p = 2) — the D3a discriminator
 
@@ -616,11 +714,13 @@ Accounting: trade 1 as MF4 (**+600**, cash 2200); trade 2 entry qty =
 2100, 1900, 1900]`.
 
 **Metrics:** tR **0.1875**; rT +300, uP 0, nP +300; cT/w/l/be
-**3/1/1/1**; wR **0.5** — the candidate D3 rule (1 / (1+1)); the D3a
-alternative would report 1/3 — this fixture forces the choice; mDD
-**0.25** (same 2100 → 1575 event; the breakeven trade adds none); PF
-**2** — the breakeven trade contributes to neither gross sum, pinning
-its exclusion from the D5 numerator *and* denominator.
+**3/1/1/1**; wR **1/3** (quotient form ≈ 0.3333) — **the D3a ruling's
+pin**: one win over all three closed trades; the rejected
+directional-denominator candidate would have read 0.5, and this fixture
+is what forces the two apart; mDD **0.25** (same 2100 → 1575 event; the
+breakeven trade adds none); PF **2** — the breakeven trade contributes
+to neither gross sum, pinning its exclusion from the D5 numerator *and*
+denominator (a breakeven lowers `winRate` but never touches PF).
 
 ### MF7 — open at end; later higher peak, deeper drawdown (new trace WT5, p = 3)
 
@@ -650,7 +750,7 @@ markedValue 1900, unrealizedPnl +300}`; equity `[1600, 1600, 1600, 1600,
 2000, 1800, 2400, 1800, 1900]`; finalEquity 1900.
 
 **Metrics:** tR **0.1875**; rT 0, uP **+300**, nP +300; cT/w/l/be
-0/0/0/0; wR null (ND); mDD **0.25** — peak₁ 2000 (bar 4) → 1800 gives
+0/0/0/0; wR null (IC); mDD **0.25** — peak₁ 2000 (bar 4) → 1800 gives
 0.1; **higher** peak₂ 2400 (bar 6) → 1800 gives the **deeper** 600/2400
 (bar-8's 500/2400 ≈ 0.208 stays below) — pinning the running-peak reset;
 PF null (IC). The whole fixture is computed **with the position still
@@ -703,8 +803,64 @@ markedValue 1500, unrealizedPnl +200}`; equity `[1300, 1300, 1300, 1300,
 1500, 1500]`.
 
 **Metrics:** tR 200/1300; rT 0, uP +200, nP +200; cT/w/l/be 0/0/0/0; wR
-null (ND); mDD **0** (the series never falls below its running peak —
-the monotone case of D4); PF null (IC).
+null (IC); mDD **0** (the series never falls below its anchored running
+peak — the monotone case of D4); PF null (IC).
+
+### MF12 — D4 anchor: initial capital is the time-zero running peak (direct rule fixture)
+
+The one non-chain fixture, verified **directly at the metrics
+boundary**: under BT1 V1 timing the earliest fill is bar 2, so genuine
+chain output always has `equitySeries[0] = initialCash` (BT2 §5.1) and
+can never make the anchor observable — yet the anchor is normative
+(§5.5), so it is pinned with a BT2-*shaped*, master-identity-consistent
+input:
+
+```text
+{ initialCash 1600, finalEquity 1600, realizedPnlTotal 0,
+  closedTradePnl [], openPositionAccounting null,
+  equitySeries [1200, 1600] }        (identity: 1600 = 1600 + 0 + 0 ✓)
+```
+
+**Metrics:** tR 0; rT 0, uP 0, nP 0; cT/w/l/be 0/0/0/0; wR null (IC);
+PF null (IC); mDD **0.25** — the anchored peak 1600 sees the first
+sample 1200 as a 400/1600 decline. An unseeded fold (peak starting at
+the first sample) would report 0 and silently lose the decline below
+initial capital — exactly the failure the owner's D4 amendment
+forbids.
+
+### MF13 — D7a: chain-reachable non-finite `totalReturn` → typed error (new trace WT6, p = 3)
+
+Cash `a = 2⁻¹⁰⁰⁰`, zero costs, `b = 2¹⁰⁰` — every input value a power
+of two, every BT2 value finite and guard-clean.
+
+| i | O | H | L | C | ch[i−1] u/l | state at eval | eval → outcome |
+|---|---|---|---|---|---|---|---|
+| 0 | a | a | a | a | — | — | warm-up |
+| 1 | a | a | a | a | — | — | warm-up |
+| 2 | a | a | a | a | — | — | warm-up |
+| 3 | a | 2a | a | a | a / a | flat | 2a > a → **entry signal** |
+| 4 | a | 2a | a | a | 2a / a | long (filled @ open a) | a < a false → hold |
+| 5 | a | a | a/2 | a | 2a / a | long | a/2 < a → **exit signal** |
+| 6 | b | b | b | b | 2a / a/2 | fill @ open b → flat | b > 2a → **entry signal**; no bar 7 |
+
+Channel checks: ch[2] = bars 0–2 → a/a; ch[3] = bars 1–3 → 2a/a; ch[4]
+= bars 2–4 → 2a/a; ch[5] = bars 3–5 → 2a/(a/2). (`a/2 = 2⁻¹⁰⁰¹` is a
+normal double; the terminal entry signal is unfillable and has no
+accounting effect, as in AF6.)
+
+Accounting (all §3 guards pass): entry qty = a/a = **1**, cashAfter 0;
+exit proceeds b, cashAfter **b**; `closedTradePnl = [fl(b − a)] = [b]`
+(2⁻¹⁰⁰⁰ is far below half an ULP of 2¹⁰⁰ — ULP(2¹⁰⁰) = 2⁴⁸ — so the
+difference rounds back to b); `realizedPnlTotal = b`; equity
+`[a, a, a, a, a, a, b]`; finalEquity b.
+
+**Expected outcome:** `totalReturn = fl(fl(b − a)/a) = fl(2¹¹⁰⁰) =
++Infinity` → the call **throws the D7a typed error naming
+`totalReturn`**. No metrics object exists for this input. Every other
+metric of this history would have been well-defined and finite (wR 1,
+PF null + NL, mDD 0, nP = b), which pins that the fault comes from
+`totalReturn`'s own derived arithmetic — exactly the D7a class: valid
+finite BT2 inputs, non-representable BT3 projection.
 
 ### Coverage map (owner's required list → fixtures)
 
@@ -720,33 +876,37 @@ the monotone case of D4); PF null (IC).
 | 8 drawdown while final position open | MF7, MF8 |
 | 9 same closed trades, different terminal mark | MF7 vs MF8 |
 | D4: monotone up → 0; flat → 0; peak→trough→recovery; later higher peak, deeper drawdown; open-position mark-to-market; costs on the entry bar | MF11; MF1/MF5; MF4; MF7; MF7/MF8; MF9 |
+| D4 amendment: `initialCash` is the time-zero running-peak anchor | MF12 (direct) |
+| D3a ruling: `winRate = wins / closedTrades`; breakeven-only → 0 | MF6 (1/3); MF5 (0) |
+| D5 refinement: three disjoint reason tokens | MF0/MF1 (IC), MF5 (ND), MF3 (NL) |
+| D7a: defined-but-non-finite projection → whole-call typed error | MF13 |
 
 Implementation-stage test obligations beyond these fixtures (recorded
 now, designed then): a multi-win gross-profit accumulation case, the §3
-typed-error paths, the structural invariants of §5.1, and the
-`accounting.js` sha-pin.
+typed-error paths, the structural invariants of §5.1, the §2.2
+allowlist-enforcement tests (access outside the allowlist rejected), and
+the `accounting.js` sha-pin.
 
 ---
 
-## 8. Decision points for owner adjudication
+## 8. Decision points — owner adjudication of 2026-08-24 (all ruled)
 
-| # | Question | Candidate (this document) | Alternative |
-|---|---|---|---|
-| D1 | Total return | `(finalEquity − initialCash) / initialCash` over BT2-reported values; fraction; no force-close; N = 0 → 0; BT2's `initialCash` domain relied on, no new domain (§5.2) | — |
-| D2 | Realized / unrealized / net | copy `realizedPnlTotal` (never re-sum); `unrealizedPnl` = BT2's value, 0 when flat; `netPnl` = one addition; equal to `finalEquity − initialCash` in exact arithmetic, comparator-checked in tests only (§5.3) | — |
-| D3 | Classification | sign of net after-cost `realizedPnl` per closed trade; breakeven (=== 0) is neither win nor loss (§4, §5.4) | — |
-| **D3a** | **winRate denominator** | **`wins / (wins + losses)`** — breakeven has no directional outcome; MF6 → 0.5 | `wins / closedTrades`; MF6 → 1/3 |
-| D4 | Max drawdown | running-peak peak-to-trough fraction over the BT2 `equitySeries`; non-negative; 0 for empty/never-declining (§5.5) | — |
-| D5 | Profit factor | closed trades after costs; structural case rule; grid per §5.6 (0 vs reasoned-null distinction preserved) | — |
-| D6 | Insufficient-sample | per-metric availability table §5.8; zero is a measured result; no generic N-trade cutoff | — |
-| D7 | JSON / numerical | finite-or-reasoned-null; nulls structural; no Infinity/NaN ever, no serialization laundering; no tolerance machinery in product (§5.7) | — |
-| **D7a** | **defined-but-non-finite evaluation** | **typed error, whole call fails loud** (BT2 §3 guard doctrine extended; pre-registered reachability §5.7) | per-metric `null` + reason `'non_representable'` |
-| **D8** | **result shape & vocabulary** | **flat 13-field shape (§5.1), camelCase conceptual names (A2 convention), reason tokens `no_directional_closed_trades` / `no_losses` / `insufficient_closed_trades`, reason ⟺ null invariant** | structured `{value, reason}` per nullable metric; different token spellings |
+| # | Question | Ratified ruling |
+|---|---|---|
+| D1 | Total return | **APPROVE** — `(finalEquity − initialCash) / initialCash` over BT2-reported values; fraction; no force-close; N = 0 → 0; BT2's `initialCash` domain relied on, no new domain (§5.2) |
+| D2 | Realized / unrealized / net | **APPROVE** — copy `realizedPnlTotal` ("BT3 must not re-sum executions or closed trades to derive `realizedPnlTotal`"); `unrealizedPnl` = BT2's value, 0 when flat; `netPnl` = one addition; comparator-checked in tests only (§2.1, §5.3) |
+| D3 | Classification | **APPROVE** — sign of net after-cost `realizedPnl` per closed trade; breakeven (=== 0, `-0` included) is neither win nor loss; count identity holds (§4, §5.4) |
+| D3a | winRate denominator | **CHANGE → `winningTrades / closedTrades`** — the plain name carries the plain meaning; breakeven lowers it; MF6 pins 1/3; breakeven-only → measured 0; null only when `closedTrades === 0`; the directional variant is a possible future `directionalWinRate` (§5.4, §6) |
+| D4 | Max drawdown | **APPROVE WITH initial-equity anchor** — running peak seeded at `initialCash` ("Initial capital is the time-zero equity anchor for drawdown"), then peak-to-trough fraction over the BT2 `equitySeries`; non-negative; 0 for empty/never-below-anchor; MF12 pins the anchor (§5.5) |
+| D5 | Profit factor | **APPROVE WITH reason-token refinement** — structural case rule decided before the division; three disjoint tokens distinguish zero closed trades / breakeven-only / no-loss histories (§5.6) |
+| D6 | Insufficient-sample | **APPROVE** — per-metric availability table §5.8 (updated per D3a); zero is a measured result; no generic N-trade cutoff |
+| D7 | JSON / numerical | **APPROVE** — finite-or-reasoned-null; nulls structural; no Infinity/NaN ever, no serialization laundering; no tolerance machinery in product (§5.7) |
+| D7a | defined-but-non-finite evaluation | **APPROVE candidate — typed error, whole call fails loud**, with the owner's narrowed requirement wording; no per-field result union; no numerical-archaeology expansion; MF13 pins the class (§5.7) |
+| D8 | result shape & vocabulary | **APPROVE** — flat 13-field shape (§5.1), camelCase conceptual names (A2 convention); final reason vocabulary locked to exactly `insufficient_closed_trades` / `no_directional_closed_trades` / `no_losses`; reason ⟺ null invariant |
 
-D1–D7 track the owner's 2026-08-24 GO message point by point; D3a and
-D7a are the two sub-choices that message explicitly left open or that
-this drafting surfaced; D8 is the one new point (shape/naming), added
-because §5.1 must bind *something* for tests to transcribe.
+All ten points were adjudicated by the owner on 2026-08-24 (§1.5
+verbatim record); this revision incorporates the amendments. Nothing in
+§8 remains open.
 
 ---
 
@@ -759,9 +919,10 @@ implementation and model review:
    fixture hand-recomputable on paper **and** machine-verified exactly
    over the CLOSED BT1+BT2 chain at the base SHA (campaign
    `bt3-2026-08-24/`);
-2. **owner adjudication of D1–D8** (no model review of the contract
-   before it; no implementation before ratification); ratification lands
-   the docs-only PR (CI1 + CI2 provenance gate);
+2. **owner adjudication of D1–D8 — DONE 2026-08-24
+   (APPROVED-WITH-AMENDMENTS, §1.5; per owner order, no Sol/Luna review
+   of the contract)**; ratification lands the docs-only PR carrying the
+   adjudicated amendments (CI1 + CI2 provenance gate);
 3. implementation RED→GREEN against the ratified contract: fixtures
    transcribed as the binding oracle; `accounting.js` joins the sha-pin
    set; the module carries the §2/§3 shape exactly;
