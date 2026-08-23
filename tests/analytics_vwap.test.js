@@ -114,6 +114,11 @@ describe('vwap kernel — window-relative Σ(hlc3×volume)/Σ(volume)', () => {
   it('negative zero volume is a legal zero contribution, not a refusal', () => {
     assert.deepEqual(vwap(...cols([vbar(1, 10, -0), vbar(2, 40, 4)])), [null, 40]);
   });
+  it('fractional positive volumes weigh exactly — never rounded before accumulation (r1 Sol F5)', () => {
+    // hlc3 {10, 20} × volumes {0.5, 1.5}: (5 + 30) / 2 = 17.5, exact in
+    // binary64. A Math.round(volume) mutant returns (10 + 40)/3 instead.
+    assert.deepEqual(vwap(...cols([vbar(1, 10, 0.5), vbar(2, 20, 1.5)])), [10, 17.5]);
+  });
   it('mismatched column lengths refuse loudly (the A1 refusal style)', () => {
     assert.throws(() => vwap([1, 2], [1], [1, 2], [1, 2]), { message: /vwap: input columns must have equal lengths/ });
     assert.throws(() => vwap([1], [1], [1], []), { message: /vwap: input columns must have equal lengths/ });
@@ -200,14 +205,38 @@ describe('core — vwap through getIndicator', () => {
       );
     }
   });
-  it('vwap with a period is refused BEFORE acquisition', async () => {
+  it('vwap with a period is refused BEFORE acquisition — including the schema-valid minimum 1 (r1 Sol F4)', async () => {
     const calls = [];
     const getOhlcv = async (args) => { calls.push(args); throw new Error('acquisition must not run'); };
-    await assert.rejects(
-      () => getIndicator({ indicator: 'vwap', period: 14, _deps: { getOhlcv } }),
-      { message: /vwap does not take a period/ },
-    );
+    for (const period of [14, 1]) {
+      await assert.rejects(
+        () => getIndicator({ indicator: 'vwap', period, _deps: { getOhlcv } }),
+        { message: /vwap does not take a period/ },
+        `period=${period}`,
+      );
+    }
     assert.equal(calls.length, 0);
+  });
+  it('the resolution refusal PRECEDES the kernel — it wins even when the kernel would also refuse (r1 Sol F2)', async () => {
+    // resolution "60" AND a negative volume: the contract requires the
+    // resolution refusal, so a gate moved after the dispatch (which would
+    // surface the volume error instead) is discriminated here.
+    const bars = [vbar(1, 10, 1), vbar(2, 20, -1)];
+    const { getOhlcv } = stubOhlcv(bars, { resolution: '60' });
+    await assert.rejects(
+      () => getIndicator({ indicator: 'vwap', _deps: { getOhlcv } }),
+      { message: /exactly "1", got: "60"/ },
+    );
+  });
+  it('a negative volume refuses THROUGH core — acquisition columns are never normalized (r1 Sol F6)', async () => {
+    // A core-side Math.abs (or any clamp) would silently compute; the
+    // kernel's per-bar refusal must propagate through getIndicator.
+    const bars = [vbar(1, 10, 1), vbar(2, 20, -1)];
+    const { getOhlcv } = stubOhlcv(bars, oneMinute);
+    await assert.rejects(
+      () => getIndicator({ indicator: 'vwap', _deps: { getOhlcv } }),
+      { message: /vwap: volume must be a non-negative number/ },
+    );
   });
   it('a non-vwap indicator with a missing/invalid period is refused BEFORE acquisition with the kernel\'s exact message', async () => {
     const calls = [];
@@ -229,13 +258,47 @@ describe('core — vwap through getIndicator', () => {
       { message: /cumulative volume is zero/ },
     );
   });
-  it('non-vwap indicators neither require nor read the resolution envelope, and gain no vwap metadata', async () => {
+  it('non-vwap indicators neither require nor read the resolution envelope, and gain no vwap metadata — ALL five (r1 Sol F8)', async () => {
+    // The vwap-only field must not leak onto ANY other indicator (a mutant
+    // widening the condition to one more indicator survives an SMA-only
+    // absence check).
     const bars = [vbar(1, 10, 1), vbar(2, 20, 1), vbar(3, 30, 1)];
     const { getOhlcv } = stubOhlcv(bars); // deliberately NO resolution field
-    const r = await getIndicator({ indicator: 'sma', period: 2, _deps: { getOhlcv } });
-    assert.equal(r.success, true);
-    assert.equal('zero_volume_nulls_total' in r.metadata, false, 'zero_volume_nulls_total appears ONLY on vwap responses');
-    assert.equal(r.period, 2, 'non-vwap results keep their period echo');
+    for (const indicator of ['sma', 'ema', 'rsi', 'atr', 'donchian']) {
+      const r = await getIndicator({ indicator, period: 2, _deps: { getOhlcv } });
+      assert.equal(r.success, true, indicator);
+      assert.equal('zero_volume_nulls_total' in r.metadata, false, `zero_volume_nulls_total leaked onto ${indicator}`);
+      assert.equal(r.period, 2, `${indicator} results keep their period echo`);
+    }
+  });
+  it('vwap forwards from/to into acquisition — the caller-selected anchor window (r1 Luna F3)', async () => {
+    // A mutant that drops from/to for vwap would silently answer with
+    // latest-mode bars — the anchor the caller chose via `from` is the
+    // product's whole point.
+    const { calls, getOhlcv } = stubOhlcv([vbar(101, 10, 1)], oneMinute);
+    await getIndicator({ indicator: 'vwap', from: 100, to: 200, count: 7, _deps: { getOhlcv } });
+    assert.deepEqual(calls[0], { summary: false, count: 7, from: 100, to: 200, includeResolution: true });
+  });
+  it('core wires the REAL high/low/close columns into hlc3 — asymmetric bar discriminates (r1 Luna F4)', async () => {
+    // (24+18+18)/3 = 20 ≠ close 18: a closes-only miswiring returns 18.
+    const bars = [{ time: 1, open: 19, high: 24, low: 18, close: 18, volume: 1 }];
+    const { getOhlcv } = stubOhlcv(bars, oneMinute);
+    const r = await getIndicator({ indicator: 'vwap', _deps: { getOhlcv } });
+    assert.deepEqual(r.series.value, [20]);
+  });
+  it('the core path transports vwap raw doubles — non-dyadic value pinned by the written expression (r1 Luna F5)', async () => {
+    const bars = [vbar(1, 10, 1), vbar(2, 20, 2)];
+    const { getOhlcv } = stubOhlcv(bars, oneMinute);
+    const r = await getIndicator({ indicator: 'vwap', _deps: { getOhlcv } });
+    assert.equal(r.series.value[1], (10 + 20 * 2) / 3, 'any rounding layer in the dispatch breaks bit-exactness');
+  });
+  it('zero_volume_nulls_total stays the FULL-window count under last (r1 Luna F6)', async () => {
+    const bars = [vbar(1, 10, 0), vbar(2, 20, 0), vbar(3, 40, 4)];
+    const { getOhlcv } = stubOhlcv(bars, oneMinute);
+    const r = await getIndicator({ indicator: 'vwap', last: 1, _deps: { getOhlcv } });
+    assert.deepEqual(r.series.value, [40]);
+    assert.equal(r.metadata.zero_volume_nulls_total, 2, 'counted BEFORE tail-slicing, like warmup_nulls_total');
+    assert.equal(r.metadata.warmup_nulls_total, 0);
   });
 });
 
@@ -267,6 +330,76 @@ describe('data — same-snapshot resolution stays out of the public shape', () =
   it('an unreadable resolution reaches the internal caller as explicit null — never invented', async () => {
     const raw = await getOhlcv({ summary: false, includeResolution: true, _deps: { evaluate: page(undefined) } });
     assert.equal(raw.resolution, null);
+  });
+  it('resolution rides the SAME evaluation as the bars — exactly one evaluate, first snapshot wins (r1 Luna F2)', async () => {
+    // A second evaluate for the resolution could race a timeframe switch
+    // between the two reads — the exact hazard the owner's D2 amendment
+    // names. The stub answers '1' only on the first call: a two-evaluate
+    // mutant reads '5' and/or bumps the count.
+    let calls = 0;
+    const evaluate = async () => {
+      calls += 1;
+      return { bars: [vbar(1, 10, 1)], total_bars: 1, truncated: false, source: 'direct_bars', resolution: calls === 1 ? '1' : '5' };
+    };
+    const r = await getOhlcv({ summary: false, includeResolution: true, _deps: { evaluate } });
+    assert.equal(calls, 1, 'the bars evaluation is the ONLY evaluation');
+    assert.equal(r.resolution, '1');
+  });
+  it('the envelope transports the authoritative value VERBATIM — numeric 1 is not laundered into "1" (r1 Luna F1)', async () => {
+    const raw = await getOhlcv({ summary: false, includeResolution: true, _deps: { evaluate: page(1) } });
+    assert.equal(raw.resolution, 1);
+    assert.notEqual(raw.resolution, '1');
+  });
+  // Executes the REAL page snippet data.js sends. An evaluate stub that
+  // ignores its `code` argument cannot see a coercion INSIDE the snippet —
+  // that blind spot is exactly how a String() shim there survived the
+  // object-stub tests (r1 Luna F1 lesson) — so these fixtures run the
+  // snippet against a fake `window` shaped like the known paths.
+  const THROWING_RESOLUTION = Symbol('resolution() throws');
+  function snippetPage(resolutionValue) {
+    const fakeBars = {
+      firstIndex: () => 0,
+      lastIndex: () => 0,
+      size: () => 1,
+      valueAt: () => [1, 10, 10, 10, 10, 5], // [time, o, h, l, c, volume]
+    };
+    const chart = {
+      resolution: () => {
+        if (resolutionValue === THROWING_RESOLUTION) throw new Error('detached chart');
+        return resolutionValue;
+      },
+      _chartWidget: { model: () => ({ mainSeries: () => ({ bars: () => fakeBars }) }) },
+    };
+    const fakeWindow = { TradingViewApi: { _activeChartWidgetWV: { value: () => chart } } };
+    // Parenthesized: the snippet begins with a newline, and a bare
+    // `return ${code}` would ASI into `return;`.
+    return async (code) => new Function('window', `return (${code});`)(fakeWindow);
+  }
+  it('the PAGE SNIPPET does not launder numeric 1 into "1" — real-snippet execution, refused end-to-end (r1 Luna F1)', async () => {
+    // D2: exact string "1" only — numeric 1 is a banned alias unless
+    // production characterization proves it.
+    const chained = (args) => getOhlcv({ ...args, _deps: { evaluate: snippetPage(1) } });
+    await assert.rejects(
+      () => getIndicator({ indicator: 'vwap', _deps: { getOhlcv: chained } }),
+      { message: /exactly "1", got: 1\. Set/ },
+    );
+  });
+  it('real-snippet execution with the authoritative string "1" computes through data → core', async () => {
+    const chained = (args) => getOhlcv({ ...args, _deps: { evaluate: snippetPage('1') } });
+    const r = await getIndicator({ indicator: 'vwap', _deps: { getOhlcv: chained } });
+    assert.equal(r.success, true);
+    assert.deepEqual(r.series.value, [10]);
+    assert.equal(r.metadata.zero_volume_nulls_total, 0);
+  });
+  it('a THROWING chart.resolution() fails CLOSED at the snippet layer — refused as null, never fail-open (r1 Sol F3)', async () => {
+    // The snippet's try/catch must leave resolution null when the page API
+    // throws; a fail-open default (e.g. initializing to "1") would compute
+    // here. Bars are otherwise fully valid.
+    const chained = (args) => getOhlcv({ ...args, _deps: { evaluate: snippetPage(THROWING_RESOLUTION) } });
+    await assert.rejects(
+      () => getIndicator({ indicator: 'vwap', _deps: { getOhlcv: chained } }),
+      { message: /exactly "1", got: null/ },
+    );
   });
 });
 

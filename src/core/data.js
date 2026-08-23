@@ -36,7 +36,8 @@ const CHART_PATH = KNOWN_PATHS.chartApi;
 // core callers only: when true, the result additionally carries the
 // AUTHORITATIVE chart.resolution() — read inside the SAME page evaluation
 // that snapshots the bars, so the two can never race apart — as `resolution`
-// (a string, or null when it cannot be established; never invented). The
+// (the value VERBATIM — string or number as the API returned it, never
+// coerced — or null when it cannot be established; never invented). The
 // served data_get_ohlcv never opts in, so its public response shape is
 // UNCHANGED — that containment is regression-pinned in the vwap test
 // suite. This is acquisition metadata, not a new acquisition path.
@@ -88,11 +89,15 @@ export async function getOhlcv({ count, summary = true, from, to, includeResolut
         if (!bars || typeof bars.lastIndex !== 'function') return null;
         // Same-snapshot authoritative resolution (issue #16 D2): read in the
         // SAME synchronous evaluation as the bars — a second evaluate could
-        // race a chart/timeframe switch between the two reads.
+        // race a chart/timeframe switch between the two reads. Transported
+        // VERBATIM (string or number, as the API returned it): a String()
+        // shim here would manufacture acceptance of numeric 1, an alias the
+        // D2 ruling forbids unless production characterization proves it.
+        // Anything non-JSON-primitive stays null (unestablished).
         var resolution = null;
         try {
           var res = ${CHART_PATH}.resolution();
-          if (res !== null && res !== undefined) resolution = String(res);
+          if (typeof res === 'string' || typeof res === 'number') resolution = res;
         } catch (e) {}
         var first = bars.firstIndex(), end = bars.lastIndex();
         var windowed = ${windowed ? 'true' : 'false'};
