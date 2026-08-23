@@ -107,6 +107,13 @@ describe('boundary — strictness and presence/type semantics', () => {
       assert.ok(parseArgs({ indicator, period: 14 }).success, `${indicator} must stay schema-accepted`);
       assert.ok(parseArgs({ indicator, period: 1 }).success, `${indicator} with the minimum period 1 must stay schema-accepted`);
     }
+    // B+ amendment: `timeframe` is an optional claim, enum-curated.
+    assert.ok(parseArgs({ indicator: 'sma', period: 2, timeframe: '5' }).success);
+    assert.ok(parseArgs({ indicator: 'vwap', timeframe: '1' }).success);
+    assert.deepEqual(parseArgs({ indicator: 'vwap', timeframe: '5' }).data, { indicator: 'vwap', timeframe: '5' });
+    for (const bad of ['15', '05', 5, 1, 'five', null, '']) {
+      assert.ok(!parseArgs({ indicator: 'sma', period: 2, timeframe: bad }).success, `timeframe=${JSON.stringify(bad)} must be schema-refused`);
+    }
     // …and vwap WITH a period is schema-legal too — that refusal is core's
     // (the per-indicator combination policy), pinned in the served test above.
     assert.ok(parseArgs({ indicator: 'vwap', period: 14 }).success);
@@ -341,6 +348,37 @@ describe('served seam — successful calls through the registered handler', () =
       await lServer.close();
     }
   });
+  it('served timeframe "5" derives completed 5m analytics through the SDK (B+ amendment)', async () => {
+    const lServer = new McpServer({ name: 'a2-served-5m-derive', version: '0.0.0' });
+    const bars = [
+      { time: 0, open: 4, high: 4, low: 4, close: 4, volume: 1 },
+      { time: 60, open: 10, high: 10, low: 10, close: 10, volume: 1 },
+      { time: 300, open: 40, high: 40, low: 40, close: 40, volume: 2 },
+      { time: 600, open: 9, high: 9, low: 9, close: 9, volume: 5 }, // terminal — excluded
+    ];
+    const getOhlcv = async () => ({ success: true, bar_count: bars.length, total_available: 999, source: 'direct_bars', mode: 'latest', bars, resolution: '1' });
+    registerAnalyticsTools(lServer, { getOhlcv });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const lClient = new Client({ name: 'a2-served-5m-derive-client', version: '0.0.0' });
+    await Promise.all([lServer.connect(st), lClient.connect(ct)]);
+    try {
+      const res = await lClient.callTool({ name: 'data_compute_indicator', arguments: { indicator: 'vwap', timeframe: '5' } });
+      assert.ok(!res.isError, res.content?.[0]?.text?.slice(0, 160));
+      const r = JSON.parse(res.content[0].text);
+      assert.equal(r.timeframe, '5');
+      assert.deepEqual(r.times, [0, 300]);
+      assert.deepEqual(r.series.value, [7, 23.5]);
+      assert.equal(r.metadata.excluded_terminal_1m_bars, 1);
+      const smaRes = await lClient.callTool({ name: 'data_compute_indicator', arguments: { indicator: 'sma', period: 1, timeframe: '5' } });
+      assert.ok(!smaRes.isError);
+      const s = JSON.parse(smaRes.content[0].text);
+      assert.deepEqual(s.series.value, [10, 40], 'A1 sma over the derived 5m closes');
+      assert.equal('zero_volume_nulls_total' in s.metadata, false);
+    } finally {
+      await lClient.close();
+      await lServer.close();
+    }
+  });
   it('served vwap on a non-1-minute chart is refused by the gate, naming required and actual', async () => {
     const lServer = new McpServer({ name: 'a2-served-5m-test', version: '0.0.0' });
     const bars = [bar(1, 10), bar(2, 11)];
@@ -370,7 +408,7 @@ describe('A2 invariants', () => {
     const src = readFileSync(join(here, '../src/core/analytics.js'), 'utf8');
     const code = src.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
     const imports = [...code.matchAll(/from '([^']+)'/g)].map((m) => m[1]).sort();
-    assert.deepEqual(imports, ['../analytics/indicators.js', '../analytics/vwap.js', './data.js']);
+    assert.deepEqual(imports, ['../analytics/indicators.js', '../analytics/timeframe.js', '../analytics/vwap.js', './data.js']);
     for (const banned of ['connection', 'evaluate', 'fetch', 'WebSocket', 'CDP']) {
       assert.ok(!code.includes(banned), `core/analytics must not reference ${banned}`);
     }

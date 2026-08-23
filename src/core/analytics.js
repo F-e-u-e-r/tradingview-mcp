@@ -32,16 +32,27 @@
  *     volume still zero", reported in the vwap-only
  *     zero_volume_nulls_total while warmup_nulls_total stays 0, and the
  *     result omits `period` entirely.
+ *
+ * The B+ owner amendment (2026-08-23, recorded on issue #16) adds the
+ * `timeframe` CLAIM: omitted means exactly the pre-amendment behavior;
+ * present ('1' | '5') enforces the canonical 1-minute acquisition (the
+ * same authoritative same-snapshot resolution the vwap gate reads) and
+ * '5' derives completed five-minute analytics — aggregated bars into the
+ * UNCHANGED A1 kernels, and for vwap a bucket-end SAMPLING of the
+ * canonical 1-minute contribution stream (never a recompute from 5m
+ * OHLC). Exclusions of incomplete leading/terminal buckets are reported
+ * observably in metadata.
  */
 import { getOhlcv as _getOhlcv } from './data.js';
 import { sma, ema, rsi, atr, donchian } from '../analytics/indicators.js';
 import { vwap } from '../analytics/vwap.js';
+import { partitionFiveMinuteBuckets, aggregateFiveMinute } from '../analytics/timeframe.js';
 
 function _resolve(deps) {
   return { getOhlcv: deps?.getOhlcv || _getOhlcv };
 }
 
-export async function getIndicator({ indicator, period, count, from, to, last, _deps } = {}) {
+export async function getIndicator({ indicator, period, count, from, to, last, timeframe, _deps } = {}) {
   const { getOhlcv } = _resolve(_deps);
 
   // Presence semantics: only undefined means omitted (issue-#3 ruling). The
@@ -49,6 +60,13 @@ export async function getIndicator({ indicator, period, count, from, to, last, _
   // direct caller's null/"5"/0 from silently truncating to nothing.
   if (last !== undefined && (typeof last !== 'number' || !Number.isInteger(last) || last < 1)) {
     throw new Error(`last must be a positive integer when provided, got: ${JSON.stringify(last)}`);
+  }
+
+  // B+ belt: the served schema curates the enum; this keeps a direct
+  // caller's '15'/5/null from silently selecting a timeframe that does
+  // not exist.
+  if (timeframe !== undefined && timeframe !== '1' && timeframe !== '5') {
+    throw new Error(`timeframe must be "1" or "5" when provided, got: ${JSON.stringify(timeframe)}`);
   }
 
   // Per-indicator period policy (issue #16), enforced BEFORE acquisition so
@@ -78,9 +96,34 @@ export async function getIndicator({ indicator, period, count, from, to, last, _
     if (resolution !== '1') {
       throw new Error(`vwap requires the chart at 1-minute resolution — the authoritative chart resolution must be exactly "1", got: ${JSON.stringify(resolution)}. Set the chart to 1-minute (chart_set_timeframe) and retry.`);
     }
+  } else if (timeframe !== undefined) {
+    // B+ (owner amendment): a timeframe is a CLAIM on the canonical
+    // 1-minute acquisition — enforced against the same authoritative
+    // same-snapshot resolution the vwap gate reads, before any kernel.
+    const resolution = ohlcv.resolution ?? null;
+    if (resolution !== '1') {
+      throw new Error(`timeframe "${timeframe}" requires the chart at 1-minute resolution — the canonical acquisition is the validated 1-minute snapshot; the authoritative chart resolution must be exactly "1", got: ${JSON.stringify(resolution)}. Set the chart to 1-minute (chart_set_timeframe) and retry.`);
+    }
   }
 
-  const bars = ohlcv.bars;
+  const sourceBars = ohlcv.bars;
+
+  // B+ derivation: timeframe "5" works on completed five-minute buckets.
+  // The A1 indicators consume the aggregated bars; vwap does NOT — its
+  // working set stays the 1-minute bars, and the 5m series is sampled
+  // from the canonical stream below (owner invariant: never recomputed
+  // from aggregated 5m OHLC).
+  let derived = null;
+  let bars = sourceBars;
+  if (timeframe === '5') {
+    if (isVwap) {
+      derived = partitionFiveMinuteBuckets(sourceBars.map((b) => b.time));
+    } else {
+      derived = aggregateFiveMinute(sourceBars);
+      bars = derived.bars;
+    }
+  }
+
   const closes = bars.map((b) => b.close);
   const highs = bars.map((b) => b.high);
   const lows = bars.map((b) => b.low);
@@ -96,14 +139,35 @@ export async function getIndicator({ indicator, period, count, from, to, last, _
     const d = donchian(highs, lows, period);
     series = { upper: d.upper, middle: d.middle, lower: d.lower };
   } else if (isVwap) {
-    series = { value: vwap(highs, lows, closes, volumes) };
+    if (timeframe === '5') {
+      const buckets = derived.buckets;
+      if (buckets.length === 0) {
+        series = { value: [] };
+      } else {
+        // Fold the canonical 1m stream only through the last completed
+        // bucket: excluded terminal bars can never affect a sampled value,
+        // so their data must not be read (it could otherwise refuse a
+        // derivation it cannot influence). Leading-cut bars DO stay in the
+        // fold — the anchor is the window start, and the 5m series equals
+        // the 1m series at every shared timestamp by construction.
+        const foldEnd = buckets[buckets.length - 1].endIndex + 1;
+        const stream = vwap(highs.slice(0, foldEnd), lows.slice(0, foldEnd), closes.slice(0, foldEnd), volumes.slice(0, foldEnd));
+        series = { value: buckets.map((b) => stream[b.endIndex]) };
+      }
+    } else {
+      series = { value: vwap(highs, lows, closes, volumes) };
+    }
   } else {
     // unreachable through the served enum; refuse rather than guess for a
     // direct caller
     throw new Error(`unknown indicator: ${JSON.stringify(indicator)}`);
   }
 
-  const total = bars.length;
+  // Output timebase: the sampled vwap derivation reports bucket starts;
+  // every other path's working bars already carry the right times (the
+  // aggregated 5m bars are stamped with their bucket start).
+  const outTimes = derived && isVwap ? derived.buckets.map((b) => b.start) : times;
+  const total = outTimes.length;
   const reference = series.value ?? series.upper;
   // For sma/ema/rsi/atr/donchian these are WARM-UP nulls; for vwap they are
   // zero-volume nulls (D4) — same count, reported under the honest name.
@@ -120,19 +184,24 @@ export async function getIndicator({ indicator, period, count, from, to, last, _
   const result = {
     success: true,
     indicator,
+    // The timeframe echo appears only when the claim was made (B+); the
+    // legacy no-claim response is byte-for-byte unchanged.
+    ...(timeframe !== undefined ? { timeframe } : {}),
     // vwap OMITS period (D4): never null, never a fabricated 0 — the field
     // pattern follows requested_window's conditional-presence precedent.
     ...(period !== undefined ? { period } : {}),
     source: {
       mode: ohlcv.mode,
-      bar_count: total,
+      // The source block is ACQUISITION truth: the fetched 1m window, even
+      // when the reported series is a 5m derivation of it.
+      bar_count: sourceBars.length,
       total_available: ohlcv.total_available,
       ...(ohlcv.requested_window ? { requested_window: ohlcv.requested_window } : {}),
       // window truncation reported by the DATA layer (left-edge keep), passed
       // through with its own note — distinct from metadata.truncated below,
       // which is the A2 `last` tail.
       ...(ohlcv.truncated ? { truncated: true, note: ohlcv.note } : {}),
-      ...(total > 0 ? { from: times[0], to: times[total - 1] } : {}),
+      ...(sourceBars.length > 0 ? { from: sourceBars[0].time, to: sourceBars[sourceBars.length - 1].time } : {}),
     },
     metadata: {
       total,
@@ -142,8 +211,12 @@ export async function getIndicator({ indicator, period, count, from, to, last, _
       // vwap-only (D4): its nulls are "cumulative volume still zero", not
       // warm-up. The field appears on NO other indicator's response.
       ...(isVwap ? { zero_volume_nulls_total: nullsTotal } : {}),
+      // B+ observable exclusions ("exclusion MUST be observable" — the
+      // BT0 §4.7 lineage): 1m bars dropped from the derivation at each
+      // edge. Present only in derived mode.
+      ...(derived ? { excluded_leading_1m_bars: derived.excludedLeading, excluded_terminal_1m_bars: derived.excludedTerminal } : {}),
     },
-    times: slice(times),
+    times: slice(outTimes),
     series: outSeries,
   };
   // Warm-up semantics only: vwap cannot reach an all-null result (its
