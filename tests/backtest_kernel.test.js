@@ -11,11 +11,23 @@
 //      contract's fixture set does not cover (array ordering across two
 //      closed trades; closed history + open position + terminal exit). Each
 //      carries its own in-comment hand derivation.
-//   3. STATIC INVARIANTS: kernel purity (single sanctioned import, no
-//      capability tokens, no clock/randomness), zero product wiring (no MCP
-//      exposure before BT5), A1 kernel immutability (owner ruling
-//      2026-08-23: BT work must not change A1 Donchian semantics), and a
-//      §4.5 field-name readback against the contract document.
+//   3. STATIC INVARIANTS: facade purity (exactly the two sanctioned local
+//      imports, no capability tokens, no clock/randomness), the §5.1.1 C
+//      facade shape (delegation only — no channel arithmetic and no second
+//      execution loop), zero product wiring (no MCP exposure before BT5), A1
+//      kernel immutability (owner ruling 2026-08-23: BT work must not change
+//      A1 Donchian semantics), and a §4.5 field-name readback against the
+//      contract document.
+//
+// BT4 NOTE (Amendment A, docs/BT4-CONTRACT.md §1.6 / §5.1.1). BT4 generalized
+// the execution loop out of src/analytics/backtest.js: the loop now lives in
+// src/analytics/engine.js and the Donchian rules in
+// src/analytics/strategies/donchian.js, with `donchianBreakoutBacktest()`
+// retained as an adapter-backed compatibility facade (D8a). Sections 1–4 and 6
+// below — the BEHAVIOURAL oracle — are untouched by that change and are
+// exactly the D5 golden regression: every ratified expected value still holds
+// through the facade. Only the source-shape tripwires in section 5 moved, to
+// the modules that now own what they guarded.
 //
 // Execution-model reminders (all owner-ratified, none reviewable here):
 // completed-bar signal → next-bar raw-open fill; strict inequalities;
@@ -284,24 +296,47 @@ describe('input validation', () => {
 
 // ── 5. static invariants — purity, isolation, A1 immutability ───────────────
 
-describe('kernel invariants', () => {
+describe('facade invariants (BT4 Amendment A — migrated from the pre-generalization kernel)', () => {
   const src = readFileSync(join(here, '../src/analytics/backtest.js'), 'utf8');
   // Scan CODE only — comments legitimately describe capabilities they forbid.
   // Block comments, full-line comments, AND trailing `//` comments are all
   // stripped (round-1: a trailing comment previously survived the filter).
-  // The trailing strip is a plain regex; safe here because this module's only
-  // string literals are its two error messages, which contain no slashes.
+  // The trailing strip is a plain regex; safe here because this module's
+  // string literals are its two error messages and its two import paths, none
+  // of which contains a `//` sequence.
   const code = src
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .split('\n')
     .map((l) => l.replace(/\/\/.*$/, ''))
     .join('\n');
 
-  it('imports exactly the A1 kernel and nothing else', () => {
+  // MIGRATED by BT4 Amendment A (docs/BT4-CONTRACT.md §1.6, normative text
+  // §5.1.1). Two tripwires that used to live here pinned the PRE-generalization
+  // source shape of this file, and the responsibilities they guarded moved when
+  // BT4 lifted the execution loop out:
+  //
+  //   * `imports exactly the A1 kernel and nothing else` and
+  //     `consumes the A1 channel — named tripwire` now live in
+  //     tests/backtest_strategy_donchian.test.js, on the module that actually
+  //     consumes the A1 channel. Nothing was weakened in the move: the exact
+  //     call shape, the occurrence counts, the verbatim decision lines and the
+  //     no-local-channel-arithmetic ban are carried over unchanged, and two
+  //     pins were ADDED — the current-bar subscript is banned outright, and the
+  //     PR #71 self-referential-band pathology is now pinned BEHAVIOURALLY.
+  //   * the capability scan became PER MODULE (§5.1.1 B); this file keeps its
+  //     own, rewritten below for a facade that legitimately imports two local
+  //     pure modules. The invariant was never "the token `import` may appear
+  //     once" — that was a technique for the old single-file architecture.
+  //
+  // What replaces them HERE is the §5.1.1 C facade test: this file must be a
+  // facade and nothing else.
+
+  it('imports exactly the generic engine and the Donchian adapter — local pure modules only', () => {
     const imports = [...code.matchAll(/\bimport\b[^;]*;/g)].map((m) => m[0]);
-    assert.equal(imports.length, 1, `exactly one import statement, got ${imports.length}`);
-    assert.match(imports[0], /from\s*'\.\/indicators\.js'/, 'the single import is ./indicators.js');
-    const rest = code.replace(imports[0], '');
+    assert.equal(imports.length, 2, `exactly two import statements, got ${imports.length}`);
+    assert.match(imports[0], /from\s*'\.\/engine\.js'/, 'the generic engine');
+    assert.match(imports[1], /from\s*'\.\/strategies\/donchian\.js'/, 'the Donchian adapter');
+    const rest = imports.reduce((acc, i) => acc.replace(i, ''), code);
     assert.ok(!/\bimport\b/.test(rest), 'no further import token in code');
   });
 
@@ -309,7 +344,9 @@ describe('kernel invariants', () => {
     // Word-boundary regexes so optional chaining (`process?.`), bare global
     // references, and dynamic import() cannot slip past a substring scan
     // (round-1 finding: `process?.hrtime.bigint()` evaded 'process.').
-    const rest = code.replace(/\bimport\b[^;]*;/, '');
+    const rest = [...code.matchAll(/\bimport\b[^;]*;/g)]
+      .map((m) => m[0])
+      .reduce((acc, i) => acc.replace(i, ''), code);
     for (const banned of [
       /\bprocess\b/, /\bperformance\b/, /\bglobalThis\b/, /\bcrypto\b/,
       /\bfetch\b/, /\bXMLHttpRequest\b/, /\bWebSocket\b/, /\bchild_process\b/,
@@ -321,30 +358,36 @@ describe('kernel invariants', () => {
     }
   });
 
-  it('consumes the A1 channel — named tripwire for the §3 / clause-10 consumption rule', () => {
-    // Token-level tripwire, not a semantic proof (semantic conformance is the
-    // review's job; an AST proof would need a parser dependency, barred by the
-    // no-new-dependency invariant). Round-2 hardening: occurrence COUNTS and
-    // verbatim decision-line pins close the dead-reference escape (a round-2
-    // mutant kept dead `upper[t - 1]` reads while deciding from a local
-    // .reduce recomputation). With counts, any extra reference — dead needle,
-    // helper hand-off, or in-place write — changes a counted number; with the
-    // pins, deciding from anything else must edit a pinned line.
-    assert.match(code, /const \{ upper, lower \} = donchian\(highs, lows, period\);/,
-      'the exact sanctioned donchian call shape');
-    assert.equal([...code.matchAll(/\bdonchian\b/g)].length, 2,
-      'donchian appears exactly twice: the import and the call');
-    assert.equal([...code.matchAll(/\bupper\b/g)].length, 2,
-      'upper appears exactly twice: the destructure and the entry decision');
-    assert.equal([...code.matchAll(/\blower\b/g)].length, 2,
-      'lower appears exactly twice: the destructure and the exit decision');
-    assert.match(code, /if \(bars\[t\]\.high > upper\[t - 1\]\) pending = \{ kind: 'entry', signalIndex: t \};/,
-      'the verbatim entry decision consumes upper[t - 1]');
-    assert.match(code, /\} else if \(bars\[t\]\.low < lower\[t - 1\]\) \{/,
-      'the verbatim exit decision consumes lower[t - 1]');
-    for (const banned of ['Math.max', 'Math.min', 'Infinity', '.reduce', '.sort', '.slice', '.filter']) {
-      assert.ok(!code.includes(banned), `no local channel arithmetic: ${banned}`);
+  it('is a facade and nothing else — delegation, no channel arithmetic, no second execution loop (§5.1.1 C)', () => {
+    // The REQUIRED shape is  backtest.js -> Donchian adapter -> generic engine.
+    // The FORBIDDEN shape is this file keeping a Donchian execution path of its
+    // own alongside the generic one, which would leave the CLOSED kernel in
+    // place and make the D5 equivalence proof meaningless.
+    assert.match(code, /export function donchianBreakoutBacktest\(bars, period = 20\) \{/,
+      'the D8a public surface keeps its exact signature');
+    assert.match(code, /return runStrategyBacktest\(bars, donchianStrategy\(period\)\);/,
+      'the verbatim delegation line — the whole body of the facade');
+
+    // No channel arithmetic of its own.
+    for (const banned of ['upper', 'lower', 'Math.max', 'Math.min', 'Infinity',
+      '.reduce', '.sort', '.slice', '.filter']) {
+      assert.ok(!code.includes(banned), `the facade must carry no channel arithmetic: ${banned}`);
     }
+    // The adapter's module PATH legitimately contains the word; what must not
+    // appear is a CALL to the A1 channel function from this file.
+    assert.ok(!/\bdonchian\s*\(/.test(code),
+      'the facade never calls the A1 channel itself — the adapter does');
+    assert.equal([...code.matchAll(/\bdonchianStrategy\b/g)].length, 2,
+      'donchianStrategy appears exactly twice: the import and the delegation');
+
+    // No second execution loop, and no execution bookkeeping.
+    for (const banned of [/\bfor\s*\(/, /\bwhile\s*\(/, /\bexecutions\b/, /\bclosedTrades\b/,
+      /\bopenPosition\b/, /\bpending\b/, /\bsignalIndex\b/, /\bfillIndex\b/, /\bfillPrice\b/]) {
+      assert.ok(!banned.test(code), `the facade owns no execution machinery: ${banned}`);
+    }
+
+    // No strategy-specific special case reaching downstream (§7.3).
+    assert.ok(!/\bif\s*\(\s*strategy/.test(code), 'no branch on strategy identity');
   });
 
   it('has zero product wiring — no MCP exposure before BT5', () => {
