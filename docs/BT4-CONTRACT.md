@@ -1,10 +1,13 @@
 # BT4 — Strategy generalization & second-strategy proof contract (V1)
 
-**Status:** owner-adjudicated 2026-08-24 —
-**APPROVED-WITH-MINOR-PRECISION** (§1.5); this revision incorporates the
-ruled precisions. **Zero product code.** Ratification lands by merging the
-docs-only PR (CI1 + CI2 provenance gate); BT4 implementation and model
-review open only after that merge. No decision point in §10 remains open.
+**Status:** **RATIFIED** 2026-08-24 at
+`835180470f636f5c5f87db48066ec19a17f5dc35` (PR #22, merged
+`e3f674b0e9dabf2e21b4c496e0ce42ff8751ecac`; owner adjudication
+APPROVED-WITH-MINOR-PRECISION, §1.5). **Amendment A** —
+structural-tripwire migration clarification — is incorporated (§1.6,
+normative text in §5.1). No decision point in §10 is open; BT4
+implementation proceeds under §11. **This document is still zero product
+code**; every product change belongs to the implementation commit.
 
 **Base:** `main @ 7e220eb48ae0846d91e6522268f59e6cec40cb32` — BT0 contract
 ratified (`438a59e`), BT1 kernel CLOSED (`0d07902`), BT2 CLOSED (contract
@@ -133,6 +136,45 @@ FEASIBILITY EVIDENCE / not implementation closure evidence**" — the
 reference engine is a design instrument, the implementation stage
 re-establishes everything RED→GREEN, and **no reviewer campaign is opened
 against the reference engine**.
+
+### 1.6 Amendment A — structural-tripwire migration clarification (owner, 2026-08-24)
+
+**Raised during implementation orientation, before any product code was
+written.** §5's phrase "the entire existing oracle keeps passing
+unchanged … BT1's 28 kernel tests" and §7.2's D8/D8a authorisation of a
+behaviour-preserving generalization of `src/analytics/backtest.js`
+cannot both hold literally. Three of the 28 tests in
+`tests/backtest_kernel.test.js` (at the ratified SHA: the
+`imports exactly the A1 kernel and nothing else`,
+`reaches for no capability and no nondeterminism source`, and
+`consumes the A1 channel — named tripwire` cases) pin the
+**pre-generalization source shape** of that file — exactly-one-import,
+an import-token capability scan, and the verbatim A1-channel consumption
+lines with their occurrence counts. Each is invalidated *by
+construction* the moment Donchian channel consumption moves into the
+adapter, which D8a requires. The other 25 are behavioural or
+contract-readback and are untouched.
+
+Owner ruling, verbatim:
+
+> **APPROVED — migrate the three BT1 source-shape tripwires with their
+> responsibilities. The BT4 contract's requirement that the "existing
+> oracle keeps passing unchanged" is hereby clarified to mean unchanged
+> behavioral semantics and expected outputs, not immutable historical
+> source-shape tests. The 25 behavioral/readback kernel tests remain
+> unchanged; the three structural tests may migrate to the Donchian
+> adapter, generic engine, and compatibility facade provided their
+> protected invariants are retained or strengthened. This is a contract
+> clarification, not a semantic departure.**
+
+Owner's characterisation of the defect being repaired: the ratified text
+mis-stated "behavioral oracle unchanged" as "all existing test source
+unchanged". **BT4 binding semantics are unchanged by this amendment.**
+
+Process (owner-ordered): docs-only; CI1 + CI2; normal merge with the
+standard readbacks; **no Sol/Luna contract review**; **no D-point
+re-adjudication**; not a new ratification campaign. Product
+implementation opens immediately after this amendment merges.
 
 ---
 
@@ -457,8 +499,11 @@ generalized engine + Donchian strategy
 bit-identical on: prior-window band; completed-bar signal; next-bar
 raw-open fill; final unfillable signal; terminal open position;
 execution count vs closed-trade count (the owner's six-point list) —
-concretely, the **entire existing oracle keeps passing unchanged**: BT0
-F1–F12 / BT1's 28 kernel tests, BT2's AF suite, BT3's MF suite.
+concretely, the **entire existing behavioral oracle keeps passing
+unchanged**: BT0 F1–F12 / BT1's kernel tests, BT2's AF suite, BT3's MF
+suite. **"Unchanged" is defined normatively in §5.1** (Amendment A) —
+this sentence originally read "BT1's 28 kernel tests" and is clarified
+there, because three of those 28 pin source shape rather than behavior.
 
 **Acceptance statement (owner ruling, verbatim):**
 
@@ -479,6 +524,107 @@ contract-stage feasibility evidence (16/16 traces through a reference
 engine) — valuable as design evidence, and explicitly **not** a
 substitute: the implementation stage re-proves equivalence against the
 real product code (owner: 「正式 implementation仍須重新證明」).
+
+### 5.1 What "unchanged" means (Amendment A, normative)
+
+Owner's binding interpretation of §5, verbatim:
+
+> **The existing behavioral oracle remains unchanged in semantics and
+> expected outputs. Tests whose sole purpose is to pin the
+> pre-generalization source-file shape may migrate to the module that
+> now owns that responsibility, provided the protected invariant is
+> preserved or strengthened and the migration is explicitly
+> regression-tested.**
+
+and, stated as a definition:
+
+> **Unchanged means observational behavior and expected semantic
+> assertions, not immutable historical test-file implementation.**
+
+Consequently, binding:
+
+| class | disposition |
+|---|---|
+| the 25 behavioural / contract-readback kernel tests | **retained as-is, original expected values untouched** |
+| the 3 source-shape structural tripwires | **may migrate** with the responsibility, under §5.1.1 |
+| BT0 F1–F12, the supplementary traces, BT2's AF suite, BT3's MF suite | **behavioural oracles — never rewritten** |
+| any protection a migrated tripwire carried | **may never be dropped** — 「不能因為叫「migration」就刪掉原有保護」 |
+
+The six observable dimensions of §5 remain the canonical migration
+oracle. Owner constraint reaffirmed: where the existing
+`deepStrictEqual` over the whole result object already covers them,
+**no second comparator abstraction is built**.
+
+#### 5.1.1 The three migrations and the discriminating power each must keep
+
+**A. A1-channel consumption tripwire → the Donchian strategy adapter.**
+The responsibility moved, so the tripwire moves with it. It must retain
+at least equal discriminating power:
+
+- the adapter's only indicator dependency is the **CLOSED A1 Donchian**;
+- **prior-channel** semantics remain explicit;
+- the adapter does **not** recompute the channel itself;
+- the adapter does **not** slip the current bar into the threshold it
+  must break;
+- the named tripwire still catches a **PR #71-class regression**
+  (a self-referential band silently producing zero trades).
+
+**B. Capability / nondeterminism scan → per-module.** The original
+technique — strip the *first* `import` statement, then ban the `import`
+token in what remains — encodes a single-file architecture and does not
+survive generalization. Replaced by a per-module scan:
+
+| module | permitted dependencies |
+|---|---|
+| generic engine | none (zero imports); no capability, no nondeterminism |
+| Donchian adapter | the A1 kernel only |
+| SMA adapter | the A1 kernel only |
+| compatibility facade | the generic engine + the Donchian adapter (local pure modules only) |
+
+The real invariant, restated by the owner: **no network / filesystem /
+clock / random / process / dynamic evaluation / external capability**
+— *not* "the source file may contain the `import` token only once",
+which was a test technique for the old architecture, never the
+invariant.
+
+**C. New facade-specific structural test → `backtest.js`.** Added, not
+merely migrated:
+
+- `donchianBreakoutBacktest()` remains exported;
+- it **delegates** to the generic engine + the Donchian adapter;
+- the facade itself contains **no Donchian channel arithmetic**;
+- the facade contains **no second execution loop**;
+- no strategy-specific execution/accounting special case appears in it.
+
+The shape this pins, and the shape it forbids:
+
+```text
+REQUIRED                          FORBIDDEN
+backtest.js                       backtest.js
+   ↓ compatibility facade only      ├─ old Donchian execution path
+Donchian adapter                    └─ new generic engine path
+   ↓ signal
+generic engine
+```
+
+The forbidden shape would leave the CLOSED Donchian path in place and
+make D5 meaningless.
+
+#### 5.1.2 Mechanism evidence is not acceptance
+
+An implementation-stage observation confirmed by execution before any
+product code: A1's `donchian()` returns an all-null result for
+`n < period` and does **not** throw, and `donchian(prefix)[t−1]` equals
+`donchian(full)[t−1]` because the bar-inclusive window ending at `t−1`
+depends only on bars ≤ `t−1`. Hence "compute the channel once over the
+whole array" and "compute it over the visible prefix once the index is
+eligible" are observationally equivalent. Owner disposition, binding:
+
+> **VALID SUPPORTING MECHANISM EVIDENCE / implementation 仍需 RED→GREEN
+> 重立.**
+
+The D5 golden regression, run against the real product code, remains the
+sole acceptance authority; no mathematical argument substitutes for it.
 
 ---
 
@@ -692,6 +838,24 @@ refactoring that file. The substitution is explicit:
   pin自己預先定義的合法 migration procedure」 — ratifying this contract
   is the adjudication that protocol requires.
 
+**What that pin now asserts (Amendment A, owner).** Its responsibility
+changes from
+
+```text
+"this file is byte-identical"
+```
+
+to
+
+```text
+"the execution semantics BT2 depends on are proven unchanged by the BT4
+ behavioral oracle, and the pin is updated to the reviewed generalized
+ implementation"
+```
+
+A1, `accounting.js`, and `metrics.js` remain byte-pinned and **may not
+be touched under cover of BT4**.
+
 **D8a — public-surface continuity — RULED: keep the export.**
 `donchianBreakoutBacktest(bars, period)` remains exported with its exact
 signature and behavior, adapter-backed, observationally identical:
@@ -801,14 +965,24 @@ Added by the 2026-08-24 adjudication (§1.5):
 | 11 | D6a reconciliation — current equality is not a crossing; previous equality is a boundary to cross from | SF10 i=4 and i=5 (§6.1a table; §2.1 item 6) |
 | 12 | D1a strictness — an inapplicable signal leaves no pending order, execution, counter, accounting effect, or rejection record | D1a no-op fixture: NONE-substitution equality through the engine AND CLOSED BT2 (§2.1 item 7) |
 
+Added by Amendment A (§1.6, normative text §5.1):
+
+| # | ruled requirement | pinned by |
+|---|---|---|
+| 13 | the 25 behavioural / readback kernel tests survive the generalization with their original expected values | the existing `tests/backtest_kernel.test.js` cases, unedited |
+| 14 | A1-channel consumption tripwire retains its discriminating power in its new home | migrated tripwire on the Donchian adapter (§5.1.1 A) — must still catch a PR #71-class self-referential band |
+| 15 | capability / nondeterminism invariant holds per module | per-module scan (§5.1.1 B): engine zero-import; adapters A1-only; facade engine+adapter only |
+| 16 | the facade is a facade, not a second execution path | new facade structural test (§5.1.1 C) — delegation, no channel arithmetic, no second execution loop |
+
 Implementation-stage test obligations recorded now: the SF7 spy-probe
 fixture (a future-reading strategy must turn the suite RED); the D5
 golden regression wiring, comparing at minimum the six §5 dimensions;
 the D4 normative prefix-determinism criterion as a binding test; the D7
 identical-signal-sequence criterion and the §7.3 identity-independence
 invariant; strategy purity/static invariants in the house style (zero
-capability, no module state); the D8 pin migration in the same reviewed
-commit.
+capability, no module state); **the three §5.1.1 tripwire migrations,
+each explicitly regression-tested rather than silently dropped**; the D8
+pin migration in the same reviewed commit.
 
 ---
 
@@ -847,22 +1021,48 @@ were the sub-choices this drafting surfaced, and all four were ruled in
    real A1 kernel, and the §2.1 equivalence/determinism/end-to-end
    evidence reproduced by the campaign checker at the base SHA;
 2. **DONE — owner adjudication of D1–D8a, 2026-08-24
-   (APPROVED-WITH-MINOR-PRECISION, §1.5)**; the ruled precisions are
-   written back into §§2–7 and §10, the checker re-run (rev 2, 10/10).
-   **Current position:** ratification lands by merging the docs-only PR
-   (CI1 + CI2 provenance gate). Per the same adjudication, **no Sol/Luna
-   review of the contract** is taken, and implementation and model review
-   stay closed until that merge;
-3. implementation RED→GREEN against the ratified contract: D5 golden
-   regression first (the whole existing oracle green through the
-   generalized engine), SF fixtures transcribed as the binding oracle,
-   the SF7 spy probe, the D8 pin migration in the same reviewed commit;
-4. narrow Sol + Luna implementation review (max effort) on the exact
+   (APPROVED-WITH-MINOR-PRECISION, §1.5)**; the ruled precisions written
+   back into §§2–7 and §10, the checker re-run (rev 2, 10/10);
+3. **DONE — ratification** at
+   `835180470f636f5c5f87db48066ec19a17f5dc35` (PR #22 merged
+   `e3f674b0…`; CI1 + CI2 at the exact head; four readbacks). No
+   Sol/Luna contract review was taken, by owner ruling;
+4. **Amendment A** (§1.6) — docs-only, CI1 + CI2, normal merge with the
+   standard readbacks, no Sol/Luna, no D-point re-adjudication. Product
+   implementation opens immediately after it merges;
+5. **implementation RED→GREEN**, in the owner-ratified order:
+
+   ```text
+    1. D5 golden regression first
+    2. generalized pure engine
+    3. Donchian adapter
+    4. compatibility facade
+    5. SMA crossover
+    6. SF7 no-lookahead spy
+    7. identical-signal-sequence / identity-independence
+    8. migrated structural tripwires
+    9. BT2 pin migration in the same reviewed implementation commit
+   10. full regression
+   11. freeze SHA
+   12. narrow Sol + Luna
+   13. CI1 + CI2
+   14. return for merge GO
+   ```
+
+6. narrow Sol + Luna implementation review (max effort) on the exact
    frozen SHA, ≤ 4 autonomous rounds (owner expectation 1–2), governed
    by §1.3 — review foci: no-lookahead, ownership boundary, Donchian
-   observational equivalence, no second-strategy special cases, no
-   arbitrary-code capability; no numerical mutation archaeology;
-5. owner adjudication of surviving findings → merge GO (CI1 + CI2).
+   observational equivalence, no second-strategy special cases,
+   downstream strategy-identity invisibility, no arbitrary-code
+   capability; no numerical mutation archaeology. **Reviewers are told
+   explicitly** (owner instruction, verbatim):
 
-Any post-ratification semantic departure requires a BT4 amendment —
-never an in-flight reinterpretation.
+   > moving source-shape tripwires to the new responsibility-owning
+   > modules is owner-ratified; review whether the invariant was
+   > preserved, not whether the old source text still exists.
+
+7. owner adjudication of surviving findings → merge GO (CI1 + CI2).
+
+Any post-ratification **semantic** departure requires a BT4 amendment —
+never an in-flight reinterpretation. Amendment A is a *clarification*
+of §5's wording, not such a departure: it changes no binding semantics.
