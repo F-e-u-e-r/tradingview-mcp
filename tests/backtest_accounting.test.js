@@ -820,14 +820,30 @@ describe('accounting invariants', () => {
     }
   });
 
-  it('BT1 execution kernel is byte-identical to its CLOSED state (D3, owner-approved)', () => {
+  it('BT1 execution surface is byte-identical to its reviewed state (D3; pin migrated by BT4 D8)', () => {
     // "BT2 tests must pin the CLOSED BT1 kernel" — a silent touch of
     // execution semantics from the accounting workstream fails here by name.
+    //
+    // PIN MIGRATION, 2026-08-24 (BT4 contract §7.2 D8, ratified @ 8351804 and
+    // clarified by Amendment A @ dcc79a8). BT4 generalized the execution loop
+    // out of this file, which the owner authorised; the pin's responsibility
+    // therefore changed from "this file is byte-identical" to "the execution
+    // semantics BT2 depends on are proven unchanged by the BT4 behavioral
+    // oracle, and the pin is updated to the reviewed generalized
+    // implementation". That proof is the D5 golden regression: BT0's F1–F12
+    // and every supplementary trace still produce their ratified results
+    // through this file (tests/backtest_kernel.test.js, unedited behaviourally),
+    // and this suite's own AF oracle below is likewise unchanged. The literal
+    // is updated in the SAME reviewed commit, exactly as this pin's own
+    // failure message prescribes.
+    //
+    // Previous literal (pre-BT4, CLOSED BT1 kernel):
+    //   dd1f12dec0e68d841780456ef9d676058020797eb426799f1a44e55612fd7b45
     const bt1 = readFileSync(join(here, '../src/analytics/backtest.js'));
     assert.equal(
       createHash('sha256').update(bt1).digest('hex'),
-      'dd1f12dec0e68d841780456ef9d676058020797eb426799f1a44e55612fd7b45',
-      'src/analytics/backtest.js changed — BT1 is CLOSED; a change requires owner adjudication, then update this pin in the same reviewed commit',
+      '9ffa21c304d7a3e653497c0a7337e89a071fccf94858009601a51c9258adb9d7',
+      'src/analytics/backtest.js changed — the BT1 execution surface is CLOSED; a change requires owner adjudication, then update this pin in the same reviewed commit',
     );
   });
 });
