@@ -304,7 +304,18 @@ describe('kernel invariants', () => {
     // A1 shipped with zero product wiring; A2 (owner-adjudicated) exposes the
     // kernel through precisely one path: server.js -> tools/analytics.js ->
     // core/analytics.js. Nothing else may touch it.
-    const allowed = new Set(['../src/server.js', '../src/tools/analytics.js', '../src/core/analytics.js']);
+    //
+    // BT5 (contract §9.2 D8a, ratified @ 35a31c52) adds ONE consumer:
+    // core/backtest.js orchestrates the CLOSED BT1–BT4 analytics modules. The
+    // contract permits "the two BT5 files"; only the core one actually
+    // references the analytics layer (the tool file reaches it solely through
+    // core/backtest.js), so only that one is allowed here — a narrower
+    // allowance than ratified, and the gate still fails loudly if the tool
+    // file ever reaches past it.
+    const allowed = new Set([
+      '../src/server.js', '../src/tools/analytics.js', '../src/core/analytics.js',
+      '../src/core/backtest.js',
+    ]);
     const roots = ['../src/server.js', '../src/connection.js', '../src/wait.js'];
     for (const f of readdirSync(join(here, '../src/tools'))) roots.push(`../src/tools/${f}`);
     for (const f of readdirSync(join(here, '../src/core'))) {

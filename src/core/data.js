@@ -31,6 +31,15 @@ const MAX_OHLCV_BARS = 500;
 const roundPrice = (v) => (v == null ? null : Math.round(v * 1e8) / 1e8);
 const BARS_PATH = KNOWN_PATHS.mainSeriesBars;
 const CHART_PATH = KNOWN_PATHS.chartApi;
+// The bars path is the chart path plus a suffix, so the script can bind the
+// active chart ONCE and derive the bars, the resolution and the symbol from
+// that single reference. Within one synchronous evaluation nothing can run
+// between three separate `value()` calls, but BT5 §6.3 makes same-snapshot
+// provenance BINDING — so the invariant is made structural here rather than
+// left to an argument about single-threadedness. KNOWN_PATHS stays the single
+// source of truth; if the two constants ever stop sharing a prefix this falls
+// back to the original independent lookup rather than silently mis-deriving.
+const BARS_SUFFIX = BARS_PATH.startsWith(CHART_PATH) ? BARS_PATH.slice(CHART_PATH.length) : null;
 
 // `includeResolution` (issue #16, owner ruling D2) is an INTERNAL opt-in for
 // core callers only: when true, the result additionally carries the
@@ -41,7 +50,23 @@ const CHART_PATH = KNOWN_PATHS.chartApi;
 // served data_get_ohlcv never opts in, so its public response shape is
 // UNCHANGED — that containment is regression-pinned in the vwap test
 // suite. This is acquisition metadata, not a new acquisition path.
-export async function getOhlcv({ count, summary = true, from, to, includeResolution = false, _deps } = {}) {
+// `includeProvenance` (BT5, contract ratified 2026-08-24 @ 35a31c52) is a
+// second INTERNAL opt-in in exactly the shape `includeResolution` established:
+// it adds `symbol` and `terminalCompletion` — the instrument identity and the
+// terminal-bar completion EVIDENCE — read inside the SAME page evaluation that
+// snapshots the bars. BT5 §6.3 makes that atomicity binding ("no provenance
+// field may be populated by an independent subsequent chart read"), which is
+// why there is no second evaluate here and why the successor is located
+// BEFORE the window's membership filter can discard it (§6.2).
+//
+// The successor is EVIDENCE ONLY: it proves the last returned bar closed, and
+// it is never added to `bars` — the caller's window is never widened by it.
+// Completion is decided from data alone, never a clock.
+//
+// The served data_get_ohlcv never opts in, so its public response shape is
+// UNCHANGED. That containment is regression-pinned in the BT5 test suite, and
+// the BT5 contract makes any other data-layer change a scope violation.
+export async function getOhlcv({ count, summary = true, from, to, includeResolution = false, includeProvenance = false, _deps } = {}) {
   // Injection seam, same shape the other core modules already use. It carries no
   // capability of its own: production passes nothing and gets connection.js's
   // narrow evaluate().
@@ -85,23 +110,33 @@ export async function getOhlcv({ count, summary = true, from, to, includeResolut
   try {
     data = await evaluate(`
       (function() {
-        var bars = ${BARS_PATH};
+        var chart = ${CHART_PATH};
+        var bars = ${BARS_SUFFIX === null ? BARS_PATH : `chart${BARS_SUFFIX}`};
         if (!bars || typeof bars.lastIndex !== 'function') return null;
-        // Same-snapshot authoritative resolution (issue #16 D2): read in the
-        // SAME synchronous evaluation as the bars — a second evaluate could
-        // race a chart/timeframe switch between the two reads. Transported
+        // Same-snapshot authoritative resolution (issue #16 D2): read off the
+        // SAME bound chart reference as the bars, in the SAME synchronous
+        // evaluation — a second evaluate, or a second active-chart lookup,
+        // could otherwise describe a different chart. Transported
         // VERBATIM (string or number, as the API returned it): a String()
         // shim here would manufacture acceptance of numeric 1, an alias the
         // D2 ruling forbids unless production characterization proves it.
         // Anything non-JSON-primitive stays null (unestablished).
         var resolution = null;
         try {
-          var res = ${CHART_PATH}.resolution();
+          var res = chart.resolution();
           if (typeof res === 'string' || typeof res === 'number') resolution = res;
+        } catch (e) {}
+        // Same-snapshot instrument identity (BT5 §6.3), read with the same
+        // discipline as the resolution: transported VERBATIM, and null when it
+        // cannot be established — never invented, never normalized here.
+        var symbol = null;
+        try {
+          var sym = chart.symbol();
+          if (typeof sym === 'string') symbol = sym;
         } catch (e) {}
         var first = bars.firstIndex(), end = bars.lastIndex();
         var windowed = ${windowed ? 'true' : 'false'};
-        var result = [], truncated = false;
+        var result = [], idxs = [], truncated = false;
         var mk = function(v) { return {time: v[0], open: v[1], high: v[2], low: v[3], close: v[4], volume: v[5] || 0}; };
         if (windowed) {
           // Membership only. No enclosing-bar rule and no widening: a bar is in
@@ -109,23 +144,36 @@ export async function getOhlcv({ count, summary = true, from, to, includeResolut
           for (var i = first; i <= end; i++) {
             var v = bars.valueAt(i);
             if (!v) continue;
-            if (v[0] >= ${f} && v[0] <= ${t}) result.push(mk(v));
+            if (v[0] >= ${f} && v[0] <= ${t}) { result.push(mk(v)); idxs.push(i); }
           }
           if (result.length > ${limit}) {
             // Keep the START of the window: the trade being reviewed is usually
             // at its left edge, so dropping from the front would discard the
             // very bar the caller asked about.
             result = result.slice(0, ${limit});
+            idxs = idxs.slice(0, ${limit});
             truncated = true;
           }
         } else {
           var start = Math.max(first, end - ${limit} + 1);
           for (var j = start; j <= end; j++) {
             var w = bars.valueAt(j);
-            if (w) result.push(mk(w));
+            if (w) { result.push(mk(w)); idxs.push(j); }
           }
         }
-        return {bars: result, total_bars: bars.size(), truncated: truncated, source: 'direct_bars', resolution: resolution};
+        // Terminal-completion EVIDENCE (BT5 §6.2), located here — before the
+        // membership filter above has any chance to hide it from the caller.
+        // A later bar existing in THIS snapshot proves the last returned bar
+        // can take no further ticks. The successor is never pushed into
+        // result: it is proof, not backtest input.
+        var successorTime = null;
+        if (idxs.length) {
+          for (var k = idxs[idxs.length - 1] + 1; k <= end; k++) {
+            var sv = bars.valueAt(k);
+            if (sv) { successorTime = sv[0]; break; }
+          }
+        }
+        return {bars: result, total_bars: bars.size(), truncated: truncated, source: 'direct_bars', resolution: resolution, symbol: symbol, successorTime: successorTime};
       })()
     `);
   } catch { data = null; }
@@ -141,6 +189,18 @@ export async function getOhlcv({ count, summary = true, from, to, includeResolut
     }
     throw new Error('Could not extract OHLCV data. The chart may still be loading.');
   }
+
+  // Same-snapshot provenance, for internal callers only (BT5 §6.3). The raw
+  // facts were captured ATOMICALLY with the bars inside the single evaluation
+  // above; only their SHAPE is assembled here, and no chart is read again.
+  const provenance = includeProvenance
+    ? {
+      symbol: data.symbol ?? null,
+      terminalCompletion: data.successorTime === null || data.successorTime === undefined
+        ? { established: false, evidence: null, successorTime: null }
+        : { established: true, evidence: 'later_bar_in_same_snapshot', successorTime: data.successorTime },
+    }
+    : null;
 
   if (summary) {
     const bars = data.bars;
@@ -164,6 +224,7 @@ export async function getOhlcv({ count, summary = true, from, to, includeResolut
       last_5_bars: bars.slice(-5),
       // Internal callers only (D2 containment): the served tool never opts in.
       ...(includeResolution ? { resolution: data.resolution ?? null } : {}),
+      ...(provenance || {}),
     };
   }
 
@@ -171,6 +232,7 @@ export async function getOhlcv({ count, summary = true, from, to, includeResolut
   // Internal callers only (D2 containment): the served tool never opts in,
   // so data_get_ohlcv's public shape does not change.
   if (includeResolution) base.resolution = data.resolution ?? null;
+  if (provenance) Object.assign(base, provenance);
   if (windowed) {
     base.mode = 'window';
     base.requested_window = { from: f, to: t };
