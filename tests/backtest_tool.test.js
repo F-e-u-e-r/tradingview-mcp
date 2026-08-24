@@ -554,3 +554,65 @@ describe('exactly one approved path, and the five negatives (D8a)', () => {
     assert.match(strip(read('../src/core/backtest.js')), /from '\.\/data\.js'/);
   });
 });
+
+// ── 8. review-round-1 findings, pinned so they cannot regress ──────────────
+
+describe('round-1 review findings (2026-08-24), pinned', () => {
+  const T0 = 1700000000;
+  const LEGAL = { initialCash: 1000, commissionRate: 0, slippageRate: 0 };
+
+  it('F1 — zero completed bars is a BT5 boundary error, never a vacuous success', async () => {
+    // Both reviewers, independently: a single acquired bar with no successor
+    // was excluded, the pipeline then ran on nothing, and the caller received
+    // success:true with an empty result that reads exactly like a real
+    // "no trades" answer.
+    const one = [{ time: T0, open: 100, high: 105, low: 95, close: 102, volume: 10 }];
+    await assert.rejects(
+      () => computeBacktest({
+        strategy: { type: 'donchian', period: 20 }, ...LEGAL, count: 1,
+        _deps: {
+          getOhlcv: async () => ({
+            success: true, mode: 'latest', bar_count: 1, total_available: 1, source: 'direct_bars',
+            bars: one, resolution: '1', symbol: 'X',
+            terminalCompletion: { established: false, evidence: null, successorTime: null },
+          }),
+        },
+      }),
+      /computeBacktest: insufficient completed bars: acquired 1, excluded 1/,
+      'the refusal must name what happened, not return an empty success',
+    );
+  });
+
+  it('F1 — one PROVEN bar is still enough: the error is about zero, not about scarcity', async () => {
+    const one = [{ time: T0, open: 100, high: 105, low: 95, close: 102, volume: 10 }];
+    const r = await computeBacktest({
+      strategy: { type: 'donchian', period: 20 }, ...LEGAL, count: 1,
+      _deps: {
+        getOhlcv: async () => ({
+          success: true, mode: 'latest', bar_count: 1, total_available: 1, source: 'direct_bars',
+          bars: one, resolution: '1', symbol: 'X',
+          terminalCompletion: { established: true, evidence: 'later_bar_in_same_snapshot', successorTime: T0 + 60 },
+        }),
+      },
+    });
+    assert.equal(r.success, true);
+    assert.equal(r.source.bars_used, 1, 'warm-up is legitimate; only ZERO evaluable bars is an error');
+  });
+
+  it('F3 — the acquisition script binds the active chart EXACTLY once', async () => {
+    // Provenance atomicity is made structural rather than argued: bars,
+    // resolution and symbol all derive from one bound reference, so it holds
+    // regardless of whether the active-chart accessor is pure.
+    let script = '';
+    const evaluate = async (expr) => {
+      script = expr;
+      return { bars: [], total_bars: 0, truncated: false, source: 'direct_bars', resolution: null, symbol: null, successorTime: null };
+    };
+    await assert.rejects(() => realGetOhlcv({ summary: false, _deps: { evaluate } }), /Could not extract OHLCV data/);
+    assert.equal((script.match(/_activeChartWidgetWV/g) || []).length, 1,
+      'the active chart is looked up once, and everything derives from it');
+    assert.match(script, /var chart = /, 'the single bound reference');
+    assert.match(script, /chart\.resolution\(\)/, 'resolution comes off the bound chart');
+    assert.match(script, /chart\.symbol\(\)/, 'symbol comes off the bound chart');
+  });
+});

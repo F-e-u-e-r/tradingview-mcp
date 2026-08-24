@@ -150,6 +150,17 @@ export async function computeBacktest({
   const excluded = acquired.length > 0 && !completion.established ? 1 : 0;
   const bars = excluded ? acquired.slice(0, acquired.length - 1) : acquired;
 
+  // A BT5-owned boundary error (D7). Returning success:true here would hand
+  // the caller a result with no bar behind it — a vacuous "no trades" that
+  // reads exactly like a real one. The honest answer is a refusal that names
+  // what happened, and it is reported AFTER acquisition on purpose: whether a
+  // window's terminal bar can be proven complete is a property of the data,
+  // not of the request, and D4 forbids re-implementing data-layer knowledge
+  // here to guess it earlier.
+  if (bars.length === 0) {
+    fail(`insufficient completed bars: acquired ${acquired.length}, excluded ${excluded} as unprovably complete, leaving 0 to evaluate. Widen the window (from/to) or raise count so at least one acquired bar is followed by a later bar in the same snapshot.`);
+  }
+
   // ── the CLOSED pipeline, consumed untouched ──────────────────────────────
   const execution = runStrategyBacktest(bars, buildStrategy(spec));
   const accounting = accountBacktest(bars, execution, costs);

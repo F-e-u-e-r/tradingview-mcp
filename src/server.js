@@ -14,7 +14,7 @@ const server = new McpServer(
     description: 'Review-only TradingView Desktop bridge (local CDP) for trade-record review',
   },
   {
-    instructions: `TradingView review bridge — 8 tools for reviewing trade records against a live TradingView Desktop chart via CDP on 127.0.0.1:9222.
+    instructions: `TradingView review bridge — 9 tools for reviewing trade records against a live TradingView Desktop chart via CDP on 127.0.0.1:9222.
 
 Typical flow for one trade record:
 1. chart_get_state — confirm connection and current chart
@@ -22,7 +22,8 @@ Typical flow for one trade record:
 3. chart_set_visible_range — window around the trade time (unix seconds); it pages in older history, so it also serves as jump-to-date
 4. data_get_ohlcv — price context (summary by default)
 5. data_compute_indicator — derived analytics (sma/ema/rsi/atr/donchian) over the SAME validated bars; period required, raw values, leading nulls are warm-up
-6. capture_screenshot with wait_for_render=true — visual context
+6. data_compute_backtest — SIMULATION ONLY: run a Donchian or SMA-crossover strategy over those same validated bars. It does not place, submit, modify, replay, or retrieve real trades or orders; a terminal bar whose completion cannot be proven from the same snapshot is excluded and reported
+7. capture_screenshot with wait_for_render=true — visual context
 
 Boundaries (by design):
 - Chart mutations (symbol/timeframe) can persist into the saved TradingView layout. Work on a dedicated scratch layout.

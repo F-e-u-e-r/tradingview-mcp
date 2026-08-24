@@ -31,6 +31,15 @@ const MAX_OHLCV_BARS = 500;
 const roundPrice = (v) => (v == null ? null : Math.round(v * 1e8) / 1e8);
 const BARS_PATH = KNOWN_PATHS.mainSeriesBars;
 const CHART_PATH = KNOWN_PATHS.chartApi;
+// The bars path is the chart path plus a suffix, so the script can bind the
+// active chart ONCE and derive the bars, the resolution and the symbol from
+// that single reference. Within one synchronous evaluation nothing can run
+// between three separate `value()` calls, but BT5 §6.3 makes same-snapshot
+// provenance BINDING — so the invariant is made structural here rather than
+// left to an argument about single-threadedness. KNOWN_PATHS stays the single
+// source of truth; if the two constants ever stop sharing a prefix this falls
+// back to the original independent lookup rather than silently mis-deriving.
+const BARS_SUFFIX = BARS_PATH.startsWith(CHART_PATH) ? BARS_PATH.slice(CHART_PATH.length) : null;
 
 // `includeResolution` (issue #16, owner ruling D2) is an INTERNAL opt-in for
 // core callers only: when true, the result additionally carries the
@@ -101,18 +110,20 @@ export async function getOhlcv({ count, summary = true, from, to, includeResolut
   try {
     data = await evaluate(`
       (function() {
-        var bars = ${BARS_PATH};
+        var chart = ${CHART_PATH};
+        var bars = ${BARS_SUFFIX === null ? BARS_PATH : `chart${BARS_SUFFIX}`};
         if (!bars || typeof bars.lastIndex !== 'function') return null;
-        // Same-snapshot authoritative resolution (issue #16 D2): read in the
-        // SAME synchronous evaluation as the bars — a second evaluate could
-        // race a chart/timeframe switch between the two reads. Transported
+        // Same-snapshot authoritative resolution (issue #16 D2): read off the
+        // SAME bound chart reference as the bars, in the SAME synchronous
+        // evaluation — a second evaluate, or a second active-chart lookup,
+        // could otherwise describe a different chart. Transported
         // VERBATIM (string or number, as the API returned it): a String()
         // shim here would manufacture acceptance of numeric 1, an alias the
         // D2 ruling forbids unless production characterization proves it.
         // Anything non-JSON-primitive stays null (unestablished).
         var resolution = null;
         try {
-          var res = ${CHART_PATH}.resolution();
+          var res = chart.resolution();
           if (typeof res === 'string' || typeof res === 'number') resolution = res;
         } catch (e) {}
         // Same-snapshot instrument identity (BT5 §6.3), read with the same
@@ -120,7 +131,7 @@ export async function getOhlcv({ count, summary = true, from, to, includeResolut
         // cannot be established — never invented, never normalized here.
         var symbol = null;
         try {
-          var sym = ${CHART_PATH}.symbol();
+          var sym = chart.symbol();
           if (typeof sym === 'string') symbol = sym;
         } catch (e) {}
         var first = bars.firstIndex(), end = bars.lastIndex();
