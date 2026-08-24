@@ -1,8 +1,10 @@
 # BT4 — Strategy generalization & second-strategy proof contract (V1)
 
-**Status:** design-only proposal for owner adjudication. **Zero product
-code.** BT4 implementation opens only after this document is ratified; the
-decision points in §8 are the owner's to adjudicate.
+**Status:** owner-adjudicated 2026-08-24 —
+**APPROVED-WITH-MINOR-PRECISION** (§1.5); this revision incorporates the
+ruled precisions. **Zero product code.** Ratification lands by merging the
+docs-only PR (CI1 + CI2 provenance gate); BT4 implementation and model
+review open only after that merge. No decision point in §10 remains open.
 
 **Base:** `main @ 7e220eb48ae0846d91e6522268f59e6cec40cb32` — BT0 contract
 ratified (`438a59e`), BT1 kernel CLOSED (`0d07902`), BT2 CLOSED (contract
@@ -82,6 +84,56 @@ live trading.
   null), which is the exact shape the D6 second strategy needs — no new
   indicator work.
 
+### 1.5 Adjudication record (owner, 2026-08-24)
+
+Owner decision, verbatim:
+
+> **BT4 contract semantics APPROVED-WITH-MINOR-PRECISION. Ratify defined
+> no-op handling for inapplicable signals; consult the strategy on every
+> eligible bar with warm-up owned entirely by the strategy; use
+> prev-inclusive/current-strict SMA crossover semantics; preserve
+> `donchianBreakoutBacktest()` as an adapter-backed compatibility export;
+> and treat strategy identity as unobservable downstream once a signal is
+> produced. Amend the contract accordingly, re-run the design checker,
+> then open the docs-only ratification PR. No product implementation or
+> model review yet.**
+
+Every D-point candidate in §10 was approved; the four open sub-decisions
+were ruled D1a = **defined no-op**, D1b = **every bar, warm-up owned by
+the strategy**, D6a = **prev-inclusive / current-strict**, D8a = **keep
+the compatibility export**. The precisions the same decision attached —
+each written into the normative section it governs, not left in chat —
+are:
+
+1. **D1 (§3.1):** the boundary is semantic, not a locked JS spelling.
+2. **D1a (§3.1):** the no-op is *strict* — five named negatives.
+3. **D1b (§3.1):** the warm-up outcome is `NONE`; the engine is never
+   told a strategy's periods.
+4. **D2 (§3.2):** signals describe intent, not orders.
+5. **D4 (§4):** signal-prefix determinism is promoted from a
+   demonstration to a **normative acceptance criterion**.
+6. **D5 (§5):** the equivalence comparison's six observable dimensions
+   are named; no new abstraction if the existing oracle already covers
+   them.
+7. **D6a (§6.1a):** the current-vs-previous equality wording is made
+   explicit so the two halves of the rule cannot read as contradictory.
+8. **D7 (§7.1):** identical signal sequence ⇒ identical downstream
+   output, whatever produced it.
+9. **New invariant (§7.3):** strategy identity must not be observable
+   downstream of signal production — recorded as an invariant, **not** as
+   a new decision point.
+
+Process rulings attached to the same decision: **no Sol/Luna review of
+the contract** before ratification (the precisions are written back, then
+the docs-only PR opens); no product implementation and no model review
+until the ratification merge; `deaba30` is **not** the final ratified SHA
+— the amended document, re-checked, becomes the PR head. Contract-stage
+machine evidence disposition (owner, verbatim): "**VALID CONTRACT
+FEASIBILITY EVIDENCE / not implementation closure evidence**" — the
+reference engine is a design instrument, the implementation stage
+re-establishes everything RED→GREEN, and **no reviewer campaign is opened
+against the reference engine**.
+
 ---
 
 ## 2. Architecture
@@ -115,12 +167,18 @@ bars ──▶ generalized engine (BT0 §4 semantics, strategy-consulted)
   convention): the generalized engine plus two strategy definitions;
   `donchianBreakoutBacktest(bars, period)` remains exported with its
   exact current signature and behavior (D8a).
+- **The architecture line (owner, binding; normative text in §7.3).**
+  Signal production is where the strategy-specific world ends: strategy
+  identity, name, and kind are permitted to matter in exactly three
+  places — signal generation, strategy parameters, warm-up — and are
+  unobservable everywhere downstream (engine → BT2 → BT3).
 
 ### 2.1 Contract-stage machine evidence (pre-registered)
 
 The campaign scratch checker (`bt4-fixture-check.mjs`,
-`bt4-2026-08-24/`; verification tooling, not product code) already
-demonstrates, against the REAL closed kernels at this base SHA:
+`bt4-2026-08-24/`; verification tooling, not product code) — **rev 2,
+10/10 after this adjudication** — demonstrates, against the REAL closed
+kernels at this base SHA:
 
 1. **D5 feasibility:** a reference implementation of the §2 engine +
    the Donchian adapter reproduces the CLOSED BT1 kernel
@@ -134,6 +192,31 @@ demonstrates, against the REAL closed kernels at this base SHA:
    hand-derived values, zero special cases (§6 SF9).
 4. Every §6 SF signal table below is machine-verified with the REAL A1
    `sma()`.
+5. **SF8 — §7.3 shape:** a scripted stub replaying a captured signal
+   stream is indistinguishable from the real strategy at the engine
+   boundary.
+6. **SF10 — D6a reconciliation** (added by this adjudication): both
+   halves of the ruled equality wording hold in one trace, on exact
+   values.
+7. **D1a strictness** (added by this adjudication): replacing every
+   injected inapplicable signal with `NONE` leaves the execution result
+   *and* the REAL CLOSED BT2 accounting bit-identical.
+
+A companion falsifiability probe (`bt4-red-probe.mjs`, 4/4) shows the
+two added checks can actually go RED: a non-strict current side flips
+SF10 i=4, a strict previous side flips SF10 i=5, a synthetic rejection
+record breaks the D1a comparison, and a leaked pending order is refused
+outright by CLOSED BT2 with a typed error.
+
+**Owner's disposition of all of the above (verbatim, binding):**
+
+> **VALID CONTRACT FEASIBILITY EVIDENCE / not implementation closure
+> evidence.**
+
+The reference engine is a design instrument. It does not close anything,
+it is not product code, **no reviewer campaign is opened against it**,
+and the implementation stage re-establishes every one of these
+properties RED→GREEN against the real modules.
 
 ---
 
@@ -141,39 +224,102 @@ demonstrates, against the REAL closed kernels at this base SHA:
 
 ### 3.1 D1 — Ownership semantics
 
-Conceptually `strategy.evaluate(view) → signal` (the JS spelling is an
-implementation-stage decision; the semantics below are what ratifies).
+Conceptually `strategy.evaluate(view) → signal`. **This notation is
+conceptual, and deliberately not a locked JS API spelling** (owner
+precision, verbatim):
+
+> **The normative contract is semantic; the concrete JavaScript
+> function/object shape may vary provided the same visibility and
+> ownership invariants are executable-testable.**
+
+So a reviewer may not demand a particular function name, arity, or
+object shape; a reviewer may demand that the visibility and ownership
+invariants below hold and are testable by execution.
 
 Information rule (owner, verbatim):
 
 > Strategy只能從**已完成、且被 engine允許看到的 historical
 > information**產生 signal。
 
-A strategy must NOT (owner list, binding): fill itself; change cash;
-change position; collect commission; decide an execution price;
-force-close; write accounting; see a future bar. The engine continues to
-own signal → pending → next-bar-open execution → position transition.
-Consequently a strategy cannot express quantity, price, or timing — only
-the three-token intent of §3.2 — and every execution consequence
-(fill bar, fill price, position machine, terminal handling) is decided
-by the engine under BT0 §4 exactly as today.
+A strategy must NOT own (owner ratification list, binding): **fill
+timing; execution price; cash; commission/slippage; accounting;
+force-close; future data; order sizing.** The engine continues to own
+signal → pending → next-bar-open execution → position transition —
+which the owner names the most important separation in BT4 (「這是 BT4
+最重要的 separation」). Consequently a strategy
+cannot express quantity, price, or timing — only the three-token intent
+of §3.2 — and every execution consequence (fill bar, fill price,
+position machine, terminal handling) is decided by the engine under BT0
+§4 exactly as today.
 
-**D1a — inapplicable signals (sub-decision).** Candidate: an
-inapplicable signal (`ENTER_LONG` while long, `EXIT_LONG` while flat) is
-a **defined no-op** — no action, no error. This mirrors CLOSED BT1
-§4.2's state-dependence (entry-shaped breakouts while positioned are
-ignored — F7/F11) and keeps the engine total. Alternative: typed error
-(strict protocol violation). The candidate is what the §2.1 equivalence
-evidence ran under.
+**D1a — inapplicable signals — RULED: defined no-op.** An inapplicable
+signal is a **defined no-op**, never an error:
 
-**Consultation range (part of D1).** Candidate: the engine consults the
-strategy at the completion of **every** bar (after the step-1 fill, per
-BT0 §4.1), and warm-up is the strategy's own business — it returns
-`NONE` until its indicators are defined. The Donchian adapter
-internalizes BT1's `i ≥ p` eligibility; observable behavior is identical
-(§2.1 evidence — F3/F8/F9 among the 16 traces). Alternative: an
-engine-level per-strategy warm-up parameter — rejected as candidate
-because it leaks strategy knowledge into the engine.
+```text
+flat + EXIT_LONG   → no state change
+long + ENTER_LONG  → no state change
+```
+
+The governing semantics (owner, verbatim):
+
+> **strategy proposes intent; engine remains authoritative over whether
+> that intent is applicable in the current position state.**
+
+The typed-error alternative is **rejected**, for reasons the owner
+recorded: a merely redundant Donchian signal would change CLOSED
+historical behavior; the strategy would have to know *more* engine
+applicability policy, not less; and it would turn a signal suggestion
+into a strict imperative command. This also mirrors CLOSED BT1 §4.2's
+state-dependence (entry-shaped breakouts while positioned are ignored —
+F7/F11), keeps the engine total, and is the semantics the §2.1
+equivalence evidence ran under.
+
+**Strictness lock (owner, binding).** The no-op must be a *behavioral*
+no-op — an inapplicable signal produces:
+
+- **no pending order**;
+- **no execution**;
+- **no counter increment**;
+- **no accounting effect**;
+- **no synthetic rejection record**.
+
+Operationally: for any bar sequence, replacing an inapplicable signal
+with `NONE` must leave the entire execution result — and everything
+BT2/BT3 derive from it — bit-identical. Anything less 「就不叫
+behavioral no-op」 (owner). §2.1 item 7 pins exactly this, and the
+falsifiability probe recorded there shows the pin can go RED.
+
+**D1b — consultation range — RULED: every bar; warm-up owned by the
+strategy.** Binding form (owner, verbatim):
+
+> Engine consults the strategy on every eligible completed bar; strategy
+> owns its own warm-up/insufficient-history logic.
+
+The consultation happens at the completion of **every** bar (after the
+step-1 fill, per BT0 §4.1). Warm-up is expressed as an outcome, not as a
+skipped call:
+
+```text
+insufficient history  →  NONE
+```
+
+— **not** "the engine does not call the strategy". The Donchian adapter
+internalizes BT1's `i ≥ p` eligibility and the SMA strategy its own
+null-prefix handling; observable behavior is identical (§2.1 evidence —
+F3/F8/F9 among the 16 traces).
+
+**No-leak lock (owner, binding).** None of `period`, `fastPeriod`,
+`slowPeriod`, `minimumBars` — or any successor — may reach the generic
+engine. The engine-level warm-up parameter is **rejected**: it leaks
+strategy knowledge into the engine, and the failure mode it opens is the
+one that would void the milestone (owner, verbatim):
+
+```text
+if strategy === Donchian ...
+if strategy === SMA ...
+```
+
+> 那 BT4就失敗了。
 
 ### 3.2 D2 — Signal vocabulary (minimal, closed)
 
@@ -189,16 +335,42 @@ verbatim, unchanged. Explicitly excluded from the vocabulary (owner
 order): BUY/SELL quantity, limit/stop, target price, confidence,
 position sizing — "那些會污染 execution contract"。
 
+**Reading rule (owner precision, binding, verbatim):**
+
+> **Signals describe direction/state intent, not orders.**
+
+`ENTER_LONG` is not a buy order and must never be read as one — the name
+is intent vocabulary, and the precision exists so that nobody later
+argues from the name that order semantics belong inside a strategy.
+
 ### 3.3 D3 — Position visibility (minimal state)
 
 The view carries the engine position state as exactly one of
-`flat | long` — nothing more. Rationale (owner): many strategies need
-state-dependent rules (BT1's own §4.2 is state-dependent; the SMA
-strategy exits only while long). The strategy must NOT see (owner list,
-binding): cash; realized P&L; equity; commission history;
-profitability — otherwise "strategy abstraction會變成「回測結果反餵策
-略」" — the accounting result must never feed back into signal
-generation. The BT2 result object is never handed to a strategy.
+
+```text
+flat
+long
+```
+
+— nothing more. Rationale (owner): many strategies need state-dependent
+rules (BT1's own §4.2 is state-dependent; the SMA strategy exits only
+while long). The strategy must NOT see (owner ratification list,
+binding): **entry price; cash; current equity; realized/unrealized P&L;
+costs; trade count; profitability.** Otherwise "strategy abstraction會
+變成「回測結果反餵策略」" — the accounting result must never feed back
+into signal generation. The BT2 result object is never handed to a
+strategy.
+
+The concrete failure this closes (owner): a strategy that can see its own
+P&L starts writing rules like
+
+> 「虧錢就不出場」
+
+— decisions driven by backtest accounting feedback, which pollutes the
+engine/strategy boundary. Position metadata beyond `flat | long` is
+therefore not an implementation-stage judgement call: if the product ever
+needs it, **that is a new contract amendment** (owner, binding), never an
+in-flight widening.
 
 ---
 
@@ -220,18 +392,41 @@ Binding, in two layers:
    implementation-stage decision; what ratifies is that bars beyond `i`
    are not reachable through any surface the view offers.
 2. **Executable, two forms (both mandatory in the test suite):**
-   - **Signal-prefix determinism** (strategy-agnostic): for every `k`,
-     running the engine over `bars[0..k)` produces the same signal at
-     each bar as the full-array run — the signal at bar `i` is a
-     function of bars `0..i` only. (§2.1: already demonstrated 10/10 on
+   - **Signal-prefix determinism** — promoted by owner ruling from a
+     demonstration to a **normative acceptance criterion**, verbatim:
+
+     > **For any bar index `i`, the signal produced for `i` must be
+     > invariant under arbitrary changes to bars strictly after `i`.**
+
+     Executable form:
+
+     ```text
+     signal(fullSeries, i)
+     ==
+     signal(seriesTruncatedAtI, i)
+     ```
+
+     or any equivalent executable form. It is strategy-agnostic, and it
+     is deliberately stronger than a source-level check that "the
+     adapter never writes `[i+1]`". (§2.1: already demonstrated 10/10 on
      SF-core.)
    - **Adversarial probe** (fixture SF7): a spy strategy that attempts
      to read beyond its window through every surface of the view must
      be observably unable to; a hypothetical future-reading strategy
      must make the test go RED.
 
-**Bar-`i` visibility note (pre-registered against a foreseeable review
-confusion).** Donchian's rule consults the *prior-window* channel
+**Bar-`i` visibility note — owner-approved, binding.** The ruling, in
+the owner's own terms: bar `i` itself is **completed information**, so a
+strategy may read it; what is forbidden is
+
+> 用 bar `i` 本身參與建立它要突破的 threshold。
+
+Donchian therefore uses the prior channel because of *that* rule — not
+because a strategy may not read completed bar `i`. The owner ordered
+this note kept expressly so that a reviewer does not re-interpret
+no-lookahead as "only `i−1` is visible". Detail follows.
+
+Donchian's rule consults the *prior-window* channel
 `ch[i−1]` because that is Donchian's own ratified signal semantics (the
 donor's PR #71 pathology was the signal bar entering **its own breakout
 threshold** — a self-referential band, zero trades silently). It is not
@@ -263,11 +458,27 @@ bit-identical on: prior-window band; completed-bar signal; next-bar
 raw-open fill; final unfillable signal; terminal open position;
 execution count vs closed-trade count (the owner's six-point list) —
 concretely, the **entire existing oracle keeps passing unchanged**: BT0
-F1–F12 / BT1's 28 kernel tests, BT2's AF suite, BT3's MF suite. This is
-regression of a CLOSED layer, **not** a re-review of Donchian semantics;
-a finding that re-litigates Donchian rules is a scope violation. §2.1
-records the contract-stage feasibility evidence (16/16 traces through a
-reference engine).
+F1–F12 / BT1's 28 kernel tests, BT2's AF suite, BT3's MF suite.
+
+**Acceptance statement (owner ruling, verbatim):**
+
+> generalized engine + Donchian adapter observationally equals CLOSED
+> BT1 behavior over the canonical behavioral corpus.
+
+**Comparison dimensions (owner, binding minimum).** The equivalence
+comparison covers at least: **executions; closed trades; pending
+terminal signal; open terminal position; timing; fill prices** — beyond
+bare outputs. Owner constraint attached to the same ruling: *if the
+existing oracle already covers these, no new abstraction is built for
+them* — the existing suites are the instrument, not a newly-invented
+comparison layer.
+
+This is a **migration oracle, not a Donchian re-review**; a finding that
+re-litigates Donchian rules is a scope violation. §2.1 records the
+contract-stage feasibility evidence (16/16 traces through a reference
+engine) — valuable as design evidence, and explicitly **not** a
+substitute: the implementation stage re-proves equivalence against the
+real product code (owner: 「正式 implementation仍須重新證明」).
 
 ---
 
@@ -281,7 +492,7 @@ exit both exist, the signal shape (level crossing) is structurally
 different from Donchian's breakout, and hand-exact fixtures are easy
 (integer closes make SMA-2 exact halves and SMA-4 exact quarters).
 
-### 6.1 Signal rule (candidate)
+### 6.1 Signal rule (RULED — D6 approved, D6a ruled in §6.1a)
 
 Parameters: integer periods `fastPeriod < slowPeriod` (violation = typed
 error at construction). Let `f = sma(closes, fastPeriod)`,
@@ -294,8 +505,39 @@ long:  EXIT_LONG   iff  f[i] < s[i]  AND  f[i−1] ≥ s[i−1]
 otherwise → NONE
 ```
 
-Owner-preferred semantics, verbatim: "true crossing event，equality不構
-成 crossing" — operationalized as:
+### 6.1a D6a — RULED: prev-inclusive / current-strict
+
+Owner ruling: **prev-inclusive; current strict.** Binding form:
+
+```text
+long entry:  previousFast <= previousSlow  &&  currentFast >  currentSlow
+exit:        previousFast >= previousSlow  &&  currentFast <  currentSlow
+```
+
+The strict-both-sides alternative (`f[i−1] < s[i−1]` for entry, `>` for
+exit) is **rejected**: under it an exact-touch-then-cross would not be a
+crossing. SF-core i=5 is the discriminating fixture (fPrev = sPrev = 10
+exactly: ruled semantics → ENTER_LONG; rejected alternative → NONE).
+
+**Reconciliation of the two equality halves (owner precision, verbatim
+— written here expressly so the wording cannot later read as
+self-contradictory):**
+
+> **Equality at the current observation is not itself a crossing event;
+> equality at the previous observation may serve as the boundary state
+> from which a subsequent strict move to the other side constitutes a
+> crossing.**
+
+The three cases the owner enumerated (stated, as the owner stated them,
+in the entry direction; the exit rule is the exact mirror), each pinned:
+
+| case | previous | current | signal | pinned by | exit-direction mirror |
+|---|---|---|---|---|---|
+| touch then move through | `fast == slow` | `fast > slow` | **ENTER_LONG** — a legitimate crossing | SF-core i=5; SF10 i=5 | SF5 i=7 (prev `≥`, then strictly below → EXIT_LONG) |
+| current equality | `fast < slow` | `fast == slow` | **NONE** — a touch, not yet a crossing | SF10 i=4 (flat, prev strictly below) | SF5 i=6 (long, prev strictly above, current equal → no exit) |
+| staying above | `fast > slow` | `fast > slow` | **NONE** — crossing is an event, not a state | SF2b (flat, never crossed inside eligibility) | SF-core i=6/7 (long, still bullish → no re-enter, no exit) |
+
+Consequences, restated:
 
 - **equality at bar `i` never signals** (`f[i] == s[i]` satisfies
   neither strict inequality) — SF-core i=4 and SF5 i=6 pin both sides;
@@ -303,14 +545,9 @@ Owner-preferred semantics, verbatim: "true crossing event，equality不構
   having crossed does not signal (SF2b: a cross that happens inside
   warm-up is missed by design and never fires late);
 - the **previous side is inclusive** (`≤`/`≥`): touching the slow SMA
-  from below on `i−1` and closing above on `i` IS a crossing (this is
-  the owner's sketch — "fast SMA > slow SMA 且前一時點不高於 → enter").
-
-**D6a — prior-side equality (sub-decision).** Candidate:
-prev-inclusive as above. Alternative: strict both sides
-(`f[i−1] < s[i−1]` for entry, `>` for exit), under which an
-exact-touch-then-cross is not a crossing. SF-core i=5 discriminates
-(fPrev = sPrev = 10 exactly: candidate → ENTER, alternative → NONE).
+  from below on `i−1` and closing above on `i` IS a crossing (the
+  owner's original sketch — "fast SMA > slow SMA 且前一時點不高於 →
+  enter").
 
 ### 6.2 Hand-derived signal fixtures (machine-verified §2.1)
 
@@ -353,6 +590,26 @@ throughout eligibility.
 to bars 0–5 → ENTER_LONG at i=5, no bar 6 → zero executions, pending
 `{entry, signalIndex 5, unfillable}` (BT0 §4.3/§4.4 unchanged).
 
+**SF10** — the D6a reconciliation walked in one trace: strictly below →
+exact touch (no signal) → strict move through from that boundary state
+(signal). Closes [20, 16, 10, 8, 18, 24, 26] (fast 2 / slow 4; every
+value exact):
+
+| i | O | H | L | C | f₂ | s₄ | position | signal |
+|---|---|---|---|---|---|---|---|---|
+| 0 | 20 | 20 | 20 | 20 | — | — | flat | NONE (warm-up) |
+| 1 | 20 | 20 | 16 | 16 | 18 | — | flat | NONE (warm-up) |
+| 2 | 16 | 16 | 10 | 10 | 13 | — | flat | NONE (warm-up) |
+| 3 | 10 | 10 | 8 | 8 | 9 | 13.5 | flat | NONE (s₄[2] null) |
+| 4 | 8 | 18 | 8 | 18 | 13 | 13 | flat | NONE — **current equality is not a crossing** (prev 9 < 13.5, strictly below) |
+| 5 | 18 | 24 | 18 | 24 | 21 | 15 | flat | **ENTER_LONG** — 21 > 15 with prev 13 ≤ 13: **equality at `i−1` is the boundary state** |
+| 6 | 26 | 27 | 25 | 26 | 25 | 19 | long (filled @ open 26) | NONE (staying above is a state, not an event) |
+
+Terminal: one execution (entry s5→f6 @ 26), zero closed trades, open
+position carried, no pending signal. SF10 is what makes the two halves
+of the ruled equality wording separately falsifiable: i=4 falsifies
+"current equality signals", i=5 falsifies "previous equality blocks".
+
 **SF9** — end-to-end acceptance shape (D7): SF-core with cash 1400,
 zero costs, through the REAL CLOSED BT2+BT3: qty = 1400/14 = 100 exact;
 exit → cash 800; `closedTradePnl = [−600]`; equity `[1400×8, 1000,
@@ -375,10 +632,31 @@ Owner, binding: acceptance is NOT "interface written"; it is
 > 加入第二策略後，不修改 execution/accounting/metrics semantics即可完整
 > 跑完。
 
-If wiring the SMA-crossover strategy forces any of: changed fill
-timing; changed position machine; special-cased accounting; changed BT3
-metrics — the abstraction has failed and BT4 does not close. The second
-strategy is the falsification instrument, not a feature.
+If wiring the SMA-crossover strategy forces any of: changed **execution
+timing**; changed **pending semantics**; changed **BT2 accounting**;
+changed **BT3 metrics** — the abstraction has failed and BT4 does not
+close. The second strategy is the falsification instrument, not a
+feature.
+
+**What may change vs what may not (owner ruling, binding).**
+
+| disposition | scope |
+|---|---|
+| **allowed to change** | generic engine machinery needed to replace Donchian-specific signal generation |
+| **not allowed to change** | downstream semantics gaining a special case for the second strategy |
+
+**Additional acceptance criterion (owner, verbatim — added by this
+adjudication):**
+
+> **For an identical signal sequence, execution/accounting/metrics
+> output must be independent of which strategy implementation produced
+> that sequence.**
+
+This is the executable form of "the engine does not secretly depend on
+strategy identity": replay a captured signal stream through a scripted
+stub and the result must equal the real strategy's, bit for bit (§2.1
+item 5 — SF8 — already demonstrates the shape at contract stage; §7.3
+states the invariant it enforces).
 
 ### 7.2 D8 — Closed-artifacts containment and pin migration
 
@@ -396,13 +674,86 @@ Owner distinction, verbatim:
 | `src/analytics/backtest.js` (BT1) | **may change, behavior-preserving-generalization only** (D5 gate). BT2's D3 byte-pin of this file is **migrated**: the behavioral oracle is the containment instrument, and the pin literal is updated **in the same reviewed commit** — exactly the protocol its own failure message prescribes ("a change requires owner adjudication, then update this pin in the same reviewed commit"); ratifying this contract is that adjudication |
 | new BT4 modules (engine seam, strategies) | pinned at BT4 closure like every closed layer before them |
 
-**D8a — public-surface continuity (sub-decision).** Candidate:
+**Owner ruling on the containment method (2026-08-24).** The owner
+accepted that BT4 cannot keep using "`backtest.js`'s SHA may never
+change" as the containment instrument — BT4's whole purpose requires
+refactoring that file. The substitution is explicit:
+
+- **still byte-pinned:** the A1 indicator kernel; BT2 `accounting.js`;
+  BT3 `metrics.js`;
+- **`backtest.js` may change**, and in its place (owner, verbatim):
+
+  > **BT0/BT1 behavioral semantics become the canonical immutable
+  > oracle.**
+
+- BT2's old-SHA pin of `backtest.js` is updated **in the same reviewed
+  BT4 implementation commit**, under the existing pin-amendment
+  protocol. Owner ruling on its status, verbatim: 「這不算打破 pin；是
+  pin自己預先定義的合法 migration procedure」 — ratifying this contract
+  is the adjudication that protocol requires.
+
+**D8a — public-surface continuity — RULED: keep the export.**
 `donchianBreakoutBacktest(bars, period)` remains exported with its exact
-signature and behavior — a thin wrapper over the generalized engine +
-Donchian adapter — so BT2's and BT3's test imports, and any BT0-era
-reading of the result model, continue to hold without edits beyond the
-one pin literal. Alternative: rename/split the export and sweep every
-consumer — rejected as candidate (louder diff, zero semantic gain).
+signature and behavior, adapter-backed, observationally identical:
+
+```text
+donchianBreakoutBacktest(...)
+        ↓
+Donchian strategy adapter
+        ↓
+generic backtest engine
+```
+
+It becomes a **compatibility facade**, so BT2's and BT3's test imports,
+and any BT0-era reading of the result model, continue to hold without
+edits beyond the one pin literal. The rename/split alternative is
+**rejected for this milestone** as the owner classified it — "diff大、
+產品收益零、review surface增加". A genuine public-API cleanup, if ever
+wanted, is handled separately as its own deprecation/rename work, never
+folded into BT4.
+
+### 7.3 Downstream strategy-identity independence (invariant, not a D-point)
+
+Added by the 2026-08-24 adjudication. The owner explicitly declined to
+open a new decision point for it — it is an **invariant** this contract
+states, closely related to D7 but worth its own words (owner, verbatim):
+
+> **Strategy identity must not be observable downstream of signal
+> production.**
+
+Concretely, nothing in execution, accounting, or metrics may contain:
+
+```text
+if strategyName === "donchian"
+if strategyName === "sma"
+```
+
+— nor any equivalent branch on strategy type, class, instance identity,
+parameter fingerprint, or a per-strategy flag threaded through the
+result. The only places strategy-specific knowledge is permitted:
+
+```text
+signal generation  |  parameters  |  warm-up
+```
+
+Once a signal exists, the boundary is absolute — the owner's core
+architecture line:
+
+```text
+(strategy-specific world ends)
+             ↓
+       generic engine
+             ↓
+            BT2
+             ↓
+            BT3
+```
+
+Enforcement: the D7 identical-signal-sequence criterion (§7.1) is its
+executable form — a scripted stub replaying a captured signal stream
+must be indistinguishable from the real strategy at and below the engine
+boundary. §2.1's SF8 already demonstrates it at contract stage; the
+implementation stage carries it as a binding test.
 
 ---
 
@@ -435,7 +786,7 @@ RECORD, not a blocker.
 | 1 | Donchian equivalence | D5 golden oracle (all existing suites) + §2.1 evidence (16/16) |
 | 2 | SMA warm-up → no signal | SF-core i≤3, SF2b |
 | 3 | below → crosses above → one enter | SF-core i=5 |
-| 4 | equality boundary → no false crossover | SF-core i=4 (flat), SF5 i=6 (long) |
+| 4 | equality boundary → no false crossover | SF-core i=4 (flat), SF5 i=6 (long), SF10 i=4 (prev strictly below) |
 | 5 | already-long repeated bullish → no re-enter | SF-core i=6/7 |
 | 6 | cross below while long → exit | SF-core i=8, SF5 i=7 |
 | 7 | final-bar crossover → terminal unfilled | SF6 |
@@ -443,45 +794,65 @@ RECORD, not a blocker.
 | 9 | same signals → identical execution regardless of strategy identity | SF8 (scripted-stub replay == adapter; §2.1 verified) |
 | 10 | second strategy flows through BT2+BT3 with no special cases | SF9 (§2.1 verified through the REAL closed kernels) |
 
+Added by the 2026-08-24 adjudication (§1.5):
+
+| # | ruled requirement | pinned by |
+|---|---|---|
+| 11 | D6a reconciliation — current equality is not a crossing; previous equality is a boundary to cross from | SF10 i=4 and i=5 (§6.1a table; §2.1 item 6) |
+| 12 | D1a strictness — an inapplicable signal leaves no pending order, execution, counter, accounting effect, or rejection record | D1a no-op fixture: NONE-substitution equality through the engine AND CLOSED BT2 (§2.1 item 7) |
+
 Implementation-stage test obligations recorded now: the SF7 spy-probe
 fixture (a future-reading strategy must turn the suite RED); the D5
-golden regression wiring; strategy purity/static invariants in the house
-style (zero capability, no module state); the D8 pin migration in the
-same reviewed commit.
+golden regression wiring, comparing at minimum the six §5 dimensions;
+the D4 normative prefix-determinism criterion as a binding test; the D7
+identical-signal-sequence criterion and the §7.3 identity-independence
+invariant; strategy purity/static invariants in the house style (zero
+capability, no module state); the D8 pin migration in the same reviewed
+commit.
 
 ---
 
-## 10. Decision points for owner adjudication
+## 10. Decision record — all points RULED (owner, 2026-08-24)
 
-| # | Question | Candidate (this document) | Alternative |
-|---|---|---|---|
-| D1 | Strategy boundary | pure `evaluate(view) → signal`; owner's prohibition list binding; engine owns signal→pending→next-open-fill→position (§3.1) | — |
-| **D1a** | **inapplicable signal** | **defined no-op** (mirrors BT1 state-dependence; engine total; §2.1 evidence ran under it) | typed error (strict protocol) |
-| **D1b** | **consultation range** | **engine consults every bar; warm-up internal to the strategy** (Donchian adapter internalizes `i ≥ p`; equivalence machine-verified) | engine-level warm-up parameter (leaks strategy knowledge into the engine) |
-| D2 | Signal vocabulary | `ENTER_LONG / EXIT_LONG / NONE` only; maps to §4.5 kinds; no quantity/price/confidence (§3.2) | — |
-| D3 | Position visibility | `flat / long` only; the owner's forbidden list (no cash/P&L/equity/costs/profitability); BT2 result never reaches a strategy (§3.3) | — |
-| D4 | No-lookahead | structural bounded view + two executable forms (prefix determinism, strategy-agnostic — demonstrated 10/10; adversarial spy probe) (§4) | — |
-| D5 | Donchian equivalence | bit-identical golden regression over the entire existing oracle; §2.1 contract-stage evidence 16/16; not a Donchian re-review (§5) | — |
-| D6 | Second strategy | **SMA crossover** (fast < slow, A1 `sma`, orientation: suitable); crossing-is-an-event; equality at `i` never signals (§6) | — (owner names replacement only if orientation had failed — it did not) |
-| **D6a** | **prior-side equality** | **prev-inclusive** (`≤`/`≥` — the owner sketch; touch-then-cross IS a crossing; SF-core i=5 discriminates) | strict both sides (touch-then-cross is not a crossing) |
-| D7 | Acceptance | the second strategy as falsification proof: zero semantic edits to execution/accounting/metrics, end-to-end (SF9) (§7.1) | — |
-| D8 | Containment & pin migration | semantics closed / files per the §7.2 table; BT2's `backtest.js` byte-pin migrated to the behavioral oracle + same-reviewed-commit pin update; A1/BT2/BT3 pins unchanged | — |
-| **D8a** | **public surface** | **keep `donchianBreakoutBacktest(bars, period)` exported, adapter-backed, byte-for-byte behavioral** | rename/split export + full consumer sweep |
+No decision point remains open. The owner's final table, with the
+normative section that carries each ruling and the alternative it
+rejects:
+
+| # | Question | **Ruling** | where it is normative | rejected alternative |
+|---|---|---|---|---|
+| D1 | Strategy boundary | **APPROVE** — pure evaluator; the prohibition list (fill timing, execution price, cash, commission/slippage, accounting, force-close, future data, order sizing) is binding; the engine owns signal→pending→next-open-fill→position. Precision: the contract is **semantic**, not a locked JS spelling | §3.1 | — |
+| **D1a** | **inapplicable signal** | **DEFINED NO-OP**, with the strictness lock: no pending order, no execution, no counter increment, no accounting effect, no synthetic rejection record | §3.1 | typed error (would change CLOSED behavior on a redundant signal; forces the strategy to know engine applicability policy) |
+| **D1b** | **consultation range** | **EVERY eligible completed bar; warm-up owned entirely by the strategy**, expressed as the outcome `NONE`. No `period` / `fastPeriod` / `slowPeriod` / `minimumBars` reaches the engine | §3.1 | engine-level warm-up parameter (leaks strategy knowledge; opens the `if strategy === …` failure) |
+| D2 | Signal vocabulary | **APPROVE** — `ENTER_LONG / EXIT_LONG / NONE` only. Precision: signals describe direction/state intent, **not orders** | §3.2 | — |
+| D3 | Position visibility | **`flat` / `long` ONLY** — no entry price, cash, equity, P&L, costs, trade count, profitability. Any future position metadata is a **new contract amendment** | §3.3 | — |
+| D4 | No-lookahead | **APPROVE + prefix determinism promoted to a NORMATIVE acceptance criterion**; bar-`i` visibility reading approved as written | §4 | source-level "never writes `[i+1]`" as the only check |
+| D5 | Donchian equivalence | **APPROVE** — migration oracle over the canonical corpus, comparing at minimum executions, closed trades, pending terminal signal, open terminal position, timing, fill prices; no new abstraction if the existing oracle covers them | §5 | re-reviewing Donchian semantics; building a new comparison layer |
+| D6 | Second strategy | **SMA CROSSOVER** — do not substitute another strategy | §6 | — (orientation found no unsuitability) |
+| **D6a** | **equality semantics** | **PREV-INCLUSIVE / CURRENT-STRICT**, with the reconciliation wording written into the contract verbatim | §6.1a | strict both sides (touch-then-cross would not be a crossing) |
+| D7 | Acceptance proof | **APPROVE** + the added criterion: identical signal sequence ⇒ identical execution/accounting/metrics output, whatever produced it. Allowed to change: generic engine machinery. Not allowed: downstream special cases | §7.1 | — |
+| D8 | Containment | **APPROVE the behavioral-oracle migration** — A1/BT2/BT3 stay byte-pinned; `backtest.js` may change with BT0/BT1 behavioral semantics as the canonical immutable oracle; BT2's pin literal updates in the same reviewed commit | §7.2 | keeping "`backtest.js` SHA may never change" as the instrument |
+| **D8a** | **public continuity** | **KEEP `donchianBreakoutBacktest(bars, period)`** as an adapter-backed compatibility facade | §7.2 | rename/split + consumer sweep ("diff大、產品收益零、review surface增加") |
+| — | **downstream identity independence** | recorded as an **invariant, not a new D-point**: strategy identity must not be observable downstream of signal production | §7.3 | — |
 
 D1–D8 track the owner's kickoff point by point; D1a, D1b, D6a and D8a
-are the sub-choices this drafting surfaced.
+were the sub-choices this drafting surfaced, and all four were ruled in
+§1.5.
 
 ---
 
 ## 11. BT4 closure protocol (owner-ordered sequence)
 
-1. this contract document complete and internally consistent; every SF
-   table hand-recomputable **and** machine-verified against the real A1
-   kernel, and the §2.1 equivalence/determinism/end-to-end evidence
-   reproduced by the campaign checker at the base SHA;
-2. **owner adjudication of D1–D8a** (no model review of the contract
-   before it; no implementation before ratification); ratification lands
-   the docs-only PR (CI1 + CI2 provenance gate);
+1. **DONE** — this contract document complete and internally consistent;
+   every SF table hand-recomputable **and** machine-verified against the
+   real A1 kernel, and the §2.1 equivalence/determinism/end-to-end
+   evidence reproduced by the campaign checker at the base SHA;
+2. **DONE — owner adjudication of D1–D8a, 2026-08-24
+   (APPROVED-WITH-MINOR-PRECISION, §1.5)**; the ruled precisions are
+   written back into §§2–7 and §10, the checker re-run (rev 2, 10/10).
+   **Current position:** ratification lands by merging the docs-only PR
+   (CI1 + CI2 provenance gate). Per the same adjudication, **no Sol/Luna
+   review of the contract** is taken, and implementation and model review
+   stay closed until that merge;
 3. implementation RED→GREEN against the ratified contract: D5 golden
    regression first (the whole existing oracle green through the
    generalized engine), SF fixtures transcribed as the binding oracle,
