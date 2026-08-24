@@ -1,8 +1,10 @@
 # BT5 — Minimal MCP exposure contract (V1)
 
-**Status:** design-only proposal for owner adjudication. **Zero product
-wiring.** BT5 implementation and model review open only after this document
-is ratified; the decision points in §11 are the owner's to adjudicate.
+**Status:** owner-adjudicated 2026-08-24 — **APPROVED-WITH-PRECISION**
+(§1.5); this revision incorporates the ruled precisions. **Zero product
+wiring.** Ratification lands by merging the docs-only PR (CI1 + CI2
+provenance gate); BT5 implementation and model review open only after that
+merge. No decision point in §11 remains open.
 
 **Base:** `main @ 94b21388acb175080193a2e8cfa8300719d039e9` — BT0 contract
 ratified (`438a59e`), BT1 kernel CLOSED (`0d07902`), BT2 CLOSED (`57f1915`),
@@ -78,6 +80,60 @@ not extra network; not a session/calendar layer.
   the served tool list plus a named denylist, a dispatchability check, and a
   served-blob check.
 
+### 1.5 Adjudication record (owner, 2026-08-24)
+
+Owner decision, verbatim:
+
+> **BT5 contract semantics APPROVED-WITH-PRECISION. Use
+> `data_compute_backtest` as the sole new MCP capability (allowlist 8→9);
+> keep the existing denylist rather than adding speculative names; use a
+> strict nested discriminated strategy object; retain the existing ≤500-bar
+> acquisition path; establish terminal-bar completion from same-snapshot
+> successor evidence and use any outside-window successor strictly as
+> evidence, not backtest input; capture symbol, resolution, and completion
+> provenance atomically with the OHLCV snapshot; structure the response as
+> source/assumptions/result; propagate CLOSED-kernel typed errors unchanged;
+> and migrate the prior prohibition gates into an exact-one-allowed-path
+> containment gate. Amend the contract accordingly and return with the
+> certified docs-only ratification SHA before implementation.**
+
+Every D-point was approved; the six open sub-decisions were ruled
+D1a = **no speculative denylist expansion**, D2a = **nested strict
+discriminated object**, D5a = **same-snapshot successor evidence**,
+D6a = **atomic same-snapshot symbol provenance**, D7a = **transparent
+propagation**, D8a = **gate migration to one exact allowed path**. The
+precisions the same decision attached — each written into the normative
+section it governs, not left in chat — are:
+
+1. **D1a (§4):** containment rests on the exact allowlist plus the served
+   semantics / wiring gate, **not** on an ever-growing name blacklist.
+2. **D2a (§5.1):** five binding rejections, and **no silent-ignore of a
+   foreign field**.
+3. **D3 (§5.2):** everything decidable from the request alone fails
+   **before** touching TradingView.
+4. **D5a (§6.2):** the successor is preserved *before* the membership
+   filter, is **evidence-only and never backtest input**, and the completion
+   decision must stay **auditable provenance, never an unexplained
+   boolean**.
+5. **New invariant (§6.3):** all source provenance is captured **atomically**
+   with the OHLCV snapshot.
+6. **D6a (§7):** the symbol is taken in the same snapshot and is **not
+   normalized by BT5**.
+7. **D7a (§8):** no prefix stacking; BT5 owns only its own boundary errors.
+8. **D8a (§9.2):** the migrated gate must additionally prove five negatives.
+
+Process rulings attached to the same decision: **no Sol/Luna review of the
+contract** before ratification; **no BT5 product wiring** until the
+ratification merge; `e96f0b7` is **not** the final ratified SHA — the
+amended document, re-checked, becomes the PR head. Contract-stage evidence
+disposition (owner): the orientation checker is **approved as
+feasibility/orientation evidence**, and the implementation stage must still
+re-establish everything RED→GREEN — "不要因 contract checker 通過就跳
+implementation tests". The two in-tooling corrections are dispositioned
+**VALID fixture correction / no issue** (the mid-bucket `t0`, deliberately
+kept) and **VALID checker defect / CLOSED** (the ASI early-return, diagnosed
+by a discriminating probe before the fix); neither extends to product code.
+
 ---
 
 ## 2. Architecture
@@ -111,9 +167,9 @@ not extra network; not a session/calendar layer.
 ### 2.1 Contract-stage machine evidence (pre-registered)
 
 The campaign scratch checker (`bt5-orientation-check.mjs`,
-`bt5-2026-08-24/`; verification tooling, not product code) — **6/6** —
-establishes, by execution against the REAL shipped modules and before any
-product wiring exists:
+`bt5-2026-08-24/`; verification tooling, not product code) — **rev 2, 8/8
+after this adjudication** — establishes, by execution against the REAL
+shipped modules and before any product wiring exists:
 
 1. **C1 (D1/D8 baseline):** the served allowlist is exactly the **8** tools
    the gate asserts, and the denylist **already names** every capability the
@@ -143,12 +199,33 @@ product wiring exists:
 6. **C6 (D4):** acquisition **metadata** can be added for internal callers
    without changing the served shape — the ratified `includeResolution`
    precedent — and an unestablished value stays `null`, never invented.
+7. **C7 (D5a / D6a, added by this adjudication):** the ruled mechanism is
+   computable in **one** snapshot — a reference acquisition in the shape
+   `src/core/data.js` already uses reads the symbol and the resolution off
+   the **same** chartApi object the bars are reached through, and decides
+   terminal completion from the successor present in that same snapshot
+   **before** the membership filter discards it. An interior window reports
+   `{established: true, evidence: 'later_bar_in_same_snapshot',
+   successorTime}`; a terminal window and latest mode both report
+   `{established: false}`. **The successor never enters the returned bars.**
+   Shifting the whole series a day decides identically — clock-free.
+8. **C8 (D2a / D3, added by this adjudication):** the nested strict
+   discriminated strategy object refuses an unknown type, a wrong
+   strategy-specific field, an extra field belonging to the other strategy,
+   a missing required parameter, an invalid period relation, and a coerced
+   string period — **all before acquisition** (the spy counts zero
+   acquisitions across every refusal), and a foreign field is refused, never
+   silently ignored.
 
 These checks ran against the **real acquisition script** from
 `src/core/data.js` (executed against a fake chart), not a paraphrase of it.
-Contract-stage evidence disposition, following the BT4 precedent: **valid
-contract feasibility evidence, not implementation closure evidence** — the
-implementation stage re-establishes everything RED→GREEN.
+Contract-stage evidence disposition (owner, this adjudication): **approved
+as feasibility / orientation evidence** — it establishes that the current
+data surface has no completion flag, that window mode destroys successor
+evidence, that same-snapshot enrichment is technically feasible, and that
+the orchestration shape works. It is **not** implementation closure
+evidence: the implementation stage re-establishes everything RED→GREEN, and
+a passing contract checker never licenses skipping implementation tests.
 
 ---
 
@@ -221,13 +298,29 @@ silently: the expansion must be written into
 `tests/tool_surface.test.js`'s `ALLOWLIST` in the same reviewed commit, with
 the A2-style rationale comment naming the adjudication.
 
-**D1a — does the denylist grow? (sub-decision.)** Candidate: **no**. C1
-verified that every capability the owner named as forbidden is already
-denylisted by name, so growth would add nothing. Alternative: add
-never-build names (`backtest_run`, `strategy_execute`, `order_submit`,
-`portfolio_backtest`) as forward tripwires. The candidate keeps the
-denylist a record of *upstream capabilities actually removed* rather than a
-speculative wishlist.
+**Why this name (owner).** It continues the repo's established split —
+`get` = authoritative/source retrieval, `compute` = local computation over
+validated data — so no caller can read it as evidence that TradingView
+itself exposes a strategy-results API.
+
+**D1a — RULED: no speculative denylist expansion.** The existing denylist
+already names, by hand, every capability the owner forbade (C1). Growth
+would add nothing real. The ruling, verbatim:
+
+> **Only the explicitly approved `data_compute_backtest` path is added;
+> absence of arbitrary future names is not modeled as an ever-growing name
+> blacklist.**
+
+Containment therefore rests on exactly two pillars, and never on
+name-guessing:
+
+1. the **exact allowlist** (set-equality, so any addition is loud);
+2. the **served semantics and the wiring gate** (§9).
+
+The denylist stays what it is — a record of *upstream capabilities actually
+removed* — rather than becoming speculative archaeology against names
+nobody has proposed. If a genuinely new dangerous capability is ever
+proposed, it is adjudicated then.
 
 ---
 
@@ -247,32 +340,40 @@ indicator graph, no dynamic eval, no plugin strategy — the §1.2 list is
 binding here, and a token outside the closed set is refused rather than
 guessed (C5).
 
-**D2a — flat parameters or a nested strategy object? (sub-decision.)** The
-owner's sketch is nested:
+**D2a — RULED: a strict NESTED discriminated strategy object.** The type and
+its parameters form **one** strict discriminated object:
 
-```text
-strategy:
-  type: "donchian"
-  period: 20
+```json
+{ "strategy": { "type": "donchian", "period": 20 } }
 ```
 
-The shipped A2 precedent is **flat** — `indicator` plus a top-level
-`period`, with the per-indicator combination policy enforced in core
-(required for sma/ema/rsi/atr/donchian, forbidden for vwap). Both work; they
-differ in where the "wrong parameter for this variant" refusal reads
-naturally.
+```json
+{ "strategy": { "type": "sma_crossover", "fastPeriod": 10, "slowPeriod": 20 } }
+```
 
-| | candidate: **nested** (owner sketch) | alternative: flat (A2 precedent) |
-|---|---|---|
-| shape | `{ strategy: { type, …params } }` | `{ strategy: 'donchian', period, fastPeriod, slowPeriod }` |
-| wrong-variant params | structurally impossible to express for another type once `type` is fixed, if the schema uses a discriminated union | expressible, so each must be refused by an explicit combination policy |
-| consistency | differs from A2 | matches A2 exactly |
-| growth | adding a third strategy adds a union arm | adding a third strategy adds more top-level optional fields whose policy multiplies |
+The flat A2 shape — `strategy: 'donchian'` alongside top-level `period`,
+`fastPeriod`, `slowPeriod`, with a runtime policy deciding which fields
+"this strategy ignores" — is **rejected**. Two strategies already produce
+mutually-exclusive parameter sets, which the owner named as exactly the
+point where a flat surface stops being worth it. Property spelling follows
+this document; the binding semantics are that **type and parameters are one
+strict discriminated object**.
 
-Recommendation: **nested**, as the owner sketched, because the second
-strategy already makes the flat shape carry three mutually-exclusive
-parameter sets — the exact case where A2's flat policy would stop scaling.
-The concrete JSON spelling is locked at ratification.
+**Binding validation (owner list).** Each of these is a refusal, never a
+normalization:
+
+| input | disposition |
+|---|---|
+| unknown strategy type | **reject** |
+| a field that belongs to no strategy | **reject** |
+| an extra field belonging to the *other* strategy | **reject** |
+| a missing required parameter | **reject** |
+| an invalid period relation (`fastPeriod >= slowPeriod`) | **reject, before acquisition** |
+
+**A foreign field is never silently ignored.** Silent-ignore is the failure
+mode this ruling exists to prevent: it lets a caller believe a parameter took
+effect when it did not. §2.1 check C8 pins all of it, with an acquisition spy
+proving not one refusable call reaches the chart.
 
 ### 5.2 D3 — parameter validation
 
@@ -288,6 +389,18 @@ Inherited from A2's ratified layering, unchanged:
 3. **Kernel guards** stay as the last belt: BT4's strategy constructors
    already refuse a non-positive-integer period and `fastPeriod >=
    slowPeriod` at construction.
+
+**Ordering rule (owner, binding):**
+
+> 所有可以純由 request schema / strategy contract 判定的錯誤，必須在
+> acquisition 前失敗。
+
+So an unknown strategy, a malformed period, or mutually incompatible
+parameters must **never** reach TradingView first and come back to report an
+input error. The owner's two reasons are both recorded: it spends no
+capability on a request already known to be invalid, and it keeps error
+**provenance** clean — a refusal that never touched the chart cannot be
+mistaken for a data problem.
 
 Periods are positive-integer JSON numbers, **never coerced, no defaults** —
 `'20'`, `20.0`-as-string, `null` and `true` are refusals, not inputs. Cost
@@ -326,53 +439,127 @@ cap, the ~24 ms measured for the generalized BT4 path at that cap **does not
 trigger an optimization workstream**. Only a BT5 proposal to raise the cap
 reopens that decision.
 
-### 6.2 D5 — terminal-bar completion (the decision §3 sets up)
+### 6.2 D5 / D5a — terminal-bar completion — RULED: same-snapshot successor evidence
 
 BT0 §4.7 is binding and already ratified: an unverifiable terminal bar must
 not participate in strategy evaluation, and **the exclusion must be
-observable**. BT5 is the layer that makes it concrete. Two candidates, both
-clock-free:
+observable**. BT5 is the layer that makes it concrete, and the owner ruled
+the mechanism:
 
-**Candidate A — fail-safe exclusion.** Always drop the last returned bar
-before evaluation, in both modes, and report it observably (e.g.
-`excluded_terminal_bars: 1` in `source`). Needs no change to any shipped
-module. Cost: in a historical window where a successor demonstrably exists
-in the snapshot, a genuinely-completed bar is discarded — and that is the
-product's main use case.
+> **D5a = B: same-snapshot successor evidence.**
 
-**Candidate B — completion evidence carried in the same snapshot
-(recommended).** The acquisition script already computes
-`end = bars.lastIndex()` and already knows whether a later bar exists beyond
-the returned window. Surface that as **internal acquisition metadata** —
-the exact shape issue #16 D2 ratified for `includeResolution`: an opt-in
-that internal callers request, that the served `data_get_ohlcv` never
-requests, and whose public shape therefore does not change (C6). Then:
+**Why this is the right model.** BT0 already ratified that completion must
+come from *evidence*, not guessing. The evidence exists and is structural:
+
+> **if a later bar already exists in the snapshot, the preceding bar is no
+> longer the terminal forming bar.**
+
+It depends on no wall clock, no timezone, no "has the minute rolled over
+yet", and no network arrival timing. The fail-safe alternative — always drop
+the last returned bar — is **rejected**: it would discard a provably settled
+bar in exactly the case BT5 exists for, reviewing a past trade.
+
+**Window mode — the successor is preserved BEFORE the filter.** The
+forbidden order is:
 
 ```text
-last returned bar has a successor in the snapshot   -> completed, KEEP
-last returned bar IS the chart terminal bar         -> unprovable, EXCLUDE
+filter the requested window  ->  the successor disappears  ->  BT5 guesses
 ```
 
-Both outcomes reported observably. This keeps a historical review's final
-bar exactly when it is provably settled, and excludes it exactly when it is
-not — with no clock anywhere.
+The ruled order keeps the evidence inside the same acquisition snapshot,
+ahead of the membership filter:
 
-**Is B inside the owner's boundary?** It adds no acquisition *path*: no
-paging, no second evaluate, no wider window, no new capability — it reads
-one more fact from the same synchronous snapshot, which is what the
-`includeResolution` ruling already established as acquisition metadata
-rather than a new path. It does, however, touch a shipped module
-(`src/core/data.js`), so it is the owner's call, not an implementation
-detail.
+```text
+loaded series
+     │
+     ├─ requested bars        -> the backtest input
+     └─ first later bar       -> PROOF ONLY
+```
 
-**D5a — which candidate.** Candidate B recommended; Candidate A is the
-zero-touch fallback if the owner wants BT5 to change no shipped module at
-all.
+so that:
+
+```text
+requested terminal bar = t, and the snapshot also holds t_next > t
+    -> t is completed; it may enter the backtest
+
+no later bar exists in the same snapshot
+    -> the requested terminal bar's completion is unproven; EXCLUDE it
+```
+
+**Evidence-only, outside-window (owner, explicit — write it down so a
+reviewer cannot reasonably ask "you already fetched the successor, why not
+use it?").** A successor lying outside the requested window proves that the
+last requested bar closed. It does **not** make itself eligible:
+
+> **the outside-window successor is EVIDENCE, never backtest input.** It is
+> never evaluated, never filled against, and never returned among the
+> result's bars.
+
+The backtest input never exceeds the requested window.
+
+**Latest mode.** The tail of the loaded series has no successor, so the final
+source bar is excluded. That is deliberate, not a missing bar: BT0
+explicitly chose not to generate a completed-bar signal from a bar that may
+still be forming.
+
+**The completion decision must stay auditable (owner, binding).** It may not
+be reduced to an unexplained boolean such as `completed: true`. The internal
+acquisition metadata must retain enough provenance to re-derive the
+decision — conceptually:
+
+```text
+terminalCompletion:
+  established:   true | false
+  evidence:      "later_bar_in_same_snapshot" | null
+  successorTime: <unix seconds> | null
+```
+
+The exact JSON spelling is an implementation-stage choice; what ratifies is:
+
+> **the completion decision must remain auditable from same-snapshot
+> provenance rather than being reduced to an unexplained boolean.**
+
+And the BT5 response must let a caller see, at minimum:
+
+- bars acquired;
+- bars actually used;
+- terminal bars excluded;
+- the completion basis.
+
+**Is this a new acquisition path? Owner ruling: NO.** It qualifies as
+**same-snapshot metadata enrichment**, the same class as the ratified
+`includeResolution`, provided the implementation keeps all of:
+
+| must hold | |
+|---|---|
+| one evaluation | no second read |
+| one loaded series | no wider external fetch |
+| no paging | no cap change |
+| the served `data_get_ohlcv` public shape | **unchanged** |
+
+Touching `src/core/data.js` is therefore **approved, and approved only for
+this narrow enrichment**. It is expressly **not** authorization to rewrite
+the data layer.
 
 **Not proposed, per owner order:** any wall-clock heuristic, any inference
 from bar spacing, any "the resolution is 1m so a bar older than 60s must be
-closed" reasoning. If the owner prefers a temporal mechanism it must be
-ratified first, and this contract does not smuggle one in.
+closed" reasoning. A temporal mechanism would have to be ratified first, and
+this contract does not smuggle one in.
+
+### 6.3 Atomic source provenance (invariant, added by the adjudication)
+
+Because the symbol, the resolution and the completion evidence all now come
+from the same envelope, the owner added one invariant that closes the whole
+class at once rather than restating it per field (verbatim):
+
+> **All source provenance used to label a BT5 result must be captured
+> atomically with the OHLCV snapshot that produced the backtest bars. No
+> provenance field may be populated by an independent subsequent chart
+> read.**
+
+This forecloses, in one clause: a wrong-symbol race, a wrong-resolution
+race, and a wrong-completion race. §2.1 check C7 demonstrates that all three
+facts are obtainable in a single evaluation.
 
 ---
 
@@ -391,34 +578,41 @@ pile of numbers without knowing whether it is same-bar-close or
 next-bar-open, whether costs were applied, and whether an open position was
 force-closed.
 
-| block | fields (candidate) |
+| block | fields (owner list, binding minimum) |
 |---|---|
-| **source** | window mode; `requested_window` when windowed; authoritative `resolution`; `bar_count`; `total_available`; first/last bar time of the evaluated set; bars excluded by the D5 completion policy, with the reason; data-layer `truncated` + `note` when the window overflowed the cap |
-| **assumptions** | the strategy and its parameters, echoed; `execution: next_bar_open`; the cost assumptions actually applied; `long_only`, single position, no pyramiding; `force_close: false`; the ≤500-bar cap |
-| **result** | `executions`, `closedTrades`, `openPosition`, `pendingSignal`, `totalExecutions`, `totalClosedTrades` (the BT0 §4.5 shape verbatim), the BT2 accounting values, and the BT3 metrics |
+| **source** | **symbol**; **resolution**; the requested window and mode; **bars acquired**; **bars actually used**; **the excluded-incomplete count and the boundary state**; the completion basis (§6.2); plus the data-layer `truncated` + `note` when the window overflowed the cap. All of it captured atomically per §6.3 |
+| **assumptions** | the strategy and its parameters, echoed; the **completed-bar signal model**; **next-bar raw-open execution**; the commission and slippage assumptions actually applied; **long-only**; **one position**; **no pyramiding**; **no force-close**; the ≤500-bar cap |
+| **result** | `executions`, `closedTrades`, `openPosition` (terminal open position), `pendingSignal` (pending terminal signal), `totalExecutions`, `totalClosedTrades` — the BT0 §4.5 shape verbatim — plus the BT2 accounting values and the BT3 metrics |
+
+**The result block is not reshaped.** BT5 must not flatten or merge these
+into something that loses a core distinction the CLOSED layers established —
+executions versus closed trades, a terminal *open position* versus a
+terminal *pending signal*. Those distinctions are the point of BT0 §4.5.
 
 C5 demonstrated this shape end-to-end through the REAL closed pipeline for
 both strategies with zero special cases.
 
-**D6a — symbol provenance (sub-decision).** The owner asked `source` to
-carry symbol provenance. Orientation finding: **the OHLCV acquisition
-snapshot does not contain the symbol.** `getOhlcv` returns bars,
-`total_bars`, `truncated`, `source`, and (opt-in) `resolution` — no
-instrument identity. Options:
+**D6a — RULED: atomic same-snapshot symbol provenance.** Orientation
+finding: **the OHLCV acquisition snapshot does not contain the symbol** —
+`getOhlcv` returns bars, `total_bars`, `truncated`, `source`, and (opt-in)
+`resolution`, and no instrument identity. The ruling is to capture it in the
+same snapshot, alongside the bars, the resolution and the completion
+evidence (§6.3). Neither omission nor a second read is acceptable:
 
-1. **Capture it in the same snapshot**, exactly as `includeResolution` did
-   for the resolution — one more read inside the same evaluation, so it
-   cannot race a symbol switch. Same disposition question as D5b.
-2. **Omit it**, and let the caller pair the response with
-   `chart_get_state`. Cheapest, but the response then cannot say what
-   instrument it describes — which is the failure mode the `source` block
-   exists to prevent.
-3. **Read it separately** — rejected outright: a second evaluate can race a
-   chart switch between the two reads, which is the exact hazard the
-   same-snapshot rule was created to close.
+| option | disposition |
+|---|---|
+| capture in the SAME snapshot | **RULED** — `chart.symbol()` sits on the same chartApi object the bars are reached through, so it costs one read inside the existing evaluation (C7) |
+| omit it, let the caller pair with `chart_get_state` | **rejected** — the response could then not say which instrument it describes |
+| read it separately afterwards | **rejected outright** — `read bars → the chart's symbol changes → read the symbol` yields internally incoherent provenance |
 
-Recommendation: **(1)**, and it rides with D5's Candidate B since both are
-the same one-field-in-the-same-snapshot question.
+Like the completion enrichment, this is **internal metadata enrichment and
+does not change the served `data_get_ohlcv` public shape**; BT5 projects it
+into its own `source` block.
+
+**Symbol spelling (owner, binding): BT5 does not normalize it.** The
+acquisition layer's authoritative representation is what is reported,
+verbatim. If canonicalization or alias handling is ever wanted, that is a
+separate adjudication — not something BT5 invents at the boundary.
 
 **Result-shape containment.** BT5 is a transparent transport: raw doubles,
 no rounding layer, no second numerical transform, and no re-derivation of
@@ -437,14 +631,31 @@ Inherited from the A2 seam, unchanged:
 - refusals fire **before acquisition** wherever the input alone decides it;
 - unknown keys are a schema-level `-32602`.
 
-**D7a — do CLOSED-kernel typed errors surface verbatim? (sub-decision.)**
-Candidate: **yes** — transparent transport, matching A2's treatment of the
-A1 kernel guards. A BT2 refusal such as `accountBacktest: computed entry
-quantity must be finite and > 0, got: 0` reaches the caller with its own
-wording, because the alternative is a BT5-invented message that hides which
-layer refused and why. Alternative: wrap every downstream error in a BT5
-prefix — rejected as candidate, since it would make the CLOSED layers'
-diagnostics unreadable at the boundary.
+**BT5 owns its own boundary errors** (owner list): unsupported strategy;
+invalid parameters; insufficient completed bars; a source-resolution
+mismatch where this contract requires one; acquisition failure. Those are
+BT5-specific typed errors and BT5 is responsible for their wording.
+
+**D7a — RULED: transparent propagation of CLOSED-kernel typed errors.**
+
+```text
+BT5's own validation failure   ->  a BT5 typed error
+a CLOSED kernel's typed failure ->  propagate UNCHANGED
+```
+
+If `accountBacktest()` or `computeBacktestMetrics()` already produced a
+ratified typed error — say `accountBacktest: computed entry quantity must be
+finite and > 0, got: 0` — it bubbles verbatim. The owner's four reasons are
+recorded: it preserves the error identity closest to the actual fault
+mechanism; it avoids a second, competing error vocabulary; it continues
+A2's treatment of the A1 guards; and BT5 is orchestration, **not a new error
+translation layer**.
+
+Explicitly forbidden — prefix stacking:
+
+```text
+BT5_ERROR: BT3_ERROR: ...
+```
 
 **No silent degradation anywhere:** BT5 never substitutes latest-mode bars
 for a failed window, never returns a partial result labelled as complete,
@@ -458,15 +669,22 @@ and never invents a value it could not read.
 
 The tool description must state, in substance and unmistakably:
 
-> **Simulation only. Does not place, replay, submit, modify, or retrieve
-> real trades/orders.**
+> **Simulation only. Does not place, submit, modify, replay, or retrieve
+> real trades or orders.**
 
 **Verified from SERVED metadata, not from a source comment.** This is the
-VWAP lesson made binding: the served description is the public contract, and
-the repo already has the mechanism — capture the registered config through
-the `registerTool` seam and assert on `served.description` and the
-per-field descriptions, plus a full in-process MCP client/server seam for
-served calls.
+VWAP lesson made binding: the served description is the public contract. The
+test must reach the **real** served surface — `tools/list` and the served
+schema through the registered handler — and not merely grep a source string.
+The repo already has both mechanisms: capturing the registered config
+through the `registerTool` seam, and a full in-process MCP client/server
+seam for served calls.
+
+**The distinction this makes public, and which is itself part of the
+contract:** BT5 returns *simulated* executions, *simulated* closed trades,
+and *simulated* equity and metrics. That is not `data_get_trades` coming
+back under a new name, and the served surface must make a caller unable to
+confuse the two.
 
 ### 9.2 The containment tests
 
@@ -484,14 +702,47 @@ string `analytics` **only** on the sanctioned path
 `server.js → tools/analytics.js → core/analytics.js`, forbids it everywhere
 else, and additionally asserts the sanctioned wiring **exists**.
 
-**D8a — how the three gates transform (sub-decision).** Candidate:
-each becomes an allowed-path gate in the A2 shape — the string is permitted
-only on `server.js → tools/<bt5>.js → core/<bt5>.js`, forbidden in every
-other root, and the sanctioned registration is asserted to exist so the gate
-also fails if the wiring silently disappears. A2's `analytics` gate gains
-the two BT5 files in its allowed set, since the BT5 core legitimately
-imports the analytics modules. Nothing is weakened: the blast radius stays
-"exactly one path", it just becomes a named path instead of none.
+**D8a — RULED: gate MIGRATION, not gate removal.** Each of the three becomes
+an allowed-path gate in the A2 shape — the string is permitted only on
+`server.js → tools/<bt5>.js → core/<bt5>.js`, forbidden in every other root,
+and the sanctioned registration is asserted to **exist** so the gate also
+fails if the wiring silently disappears. A2's `analytics` gate gains the two
+BT5 files in its allowed set, since the BT5 core legitimately imports the
+analytics modules.
+
+The gate's meaning changes from *"analytics/backtest must not reach MCP at
+all"* to:
+
+> **exactly one owner-approved wiring path exists.**
+
+It must therefore prove that path:
+
+```text
+MCP registration
+      ↓
+data_compute_backtest
+      ↓
+BT5 orchestration
+      ↓
+existing acquisition
+      ↓
+CLOSED strategy / engine
+      ↓
+BT2
+      ↓
+BT3
+```
+
+**and, at the same time, prove all five negatives (owner list, binding):**
+
+1. there is **no second backtest tool**;
+2. there is **no generic arbitrary strategy executor**;
+3. `engine.js` has **no direct MCP exposure**;
+4. nothing routes to **replay or trading**;
+5. every other denylist entry remains **forbidden**.
+
+The owner's assessment, recorded because it is the reason the migration is
+worth the work: this is **strictly stronger than deleting the gate**.
 
 This is the same class of migration BT4's Amendment A adjudicated — with the
 difference that these three gates **named BT5 as their opening event when
@@ -529,39 +780,47 @@ RECORD, not a blocker.
 
 ---
 
-## 11. Decision points for owner adjudication
+## 11. Decision record — all points RULED (owner, 2026-08-24)
 
-| # | Question | Candidate (this document) | Alternative |
+No decision point remains open. The owner's final table, with the normative
+section that carries each ruling:
+
+| # | Question | **Ruling** | where it is normative |
 |---|---|---|---|
-| **D1** | tool name / allowlist expansion | `data_compute_backtest`; deliberate **8 → 9**, written into the gate's ALLOWLIST in the same reviewed commit; no new capability class; denylist unchanged and re-pinned (§4) | — (name is owner-specified) |
-| **D1a** | does the denylist grow? | **no** — C1 verified every forbidden capability is already named | add never-build names as forward tripwires |
-| **D2** | strategy schema | closed enum `donchian` / `sma_crossover` over the CLOSED BT4 strategies; anything else refused, never guessed (§5.1) | — |
-| **D2a** | flat or nested parameters | **nested** discriminated shape, per the owner's sketch — three mutually-exclusive parameter sets is where A2's flat policy stops scaling | flat, matching A2 exactly |
-| **D3** | parameter validation | A2's three-layer discipline: strict served schema → core belt with the per-variant policy → CLOSED kernel guards; positive integers, never coerced, no defaults; refusals before acquisition (§5.2) | — |
-| **D4** | acquisition inheritance | `core/data.getOhlcv` only; two presence-selected modes, ≤500 cap, refusals propagating verbatim; nothing added (§6.1) | — |
-| **D5** | terminal-bar completion | BT0 §4.7 made concrete, clock-free, exclusion observable (§6.2) | — (the mechanism choice is D5a) |
-| **D5a** | which completion mechanism | **Candidate B** — successor evidence carried in the SAME snapshot (the ratified `includeResolution` shape); keeps a provably-settled last bar, excludes an unprovable one | **Candidate A** — always drop the last returned bar; zero-touch, but discards a good bar in the product's main use case |
-| **D6** | response shape | `source` / `assumptions` / `result`, with the assumptions a caller would otherwise have to guess made explicit (§7) | — |
-| **D6a** | symbol provenance | capture it in the SAME acquisition snapshot (rides with D5a-B) — the snapshot carries no symbol today | omit it and let the caller pair with `chart_get_state`; (a separate read is rejected outright — it can race a symbol switch) |
-| **D7** | error semantics | served error results; `getOhlcv` refusals verbatim; refuse before acquisition; unknown keys `-32602`; no silent degradation (§8) | — |
-| **D7a** | CLOSED-kernel typed errors | **surface verbatim** — transparent transport, matching A2 | wrap in a BT5 prefix |
-| **D8** | denylist / no-trading containment | served "Simulation only…" statement verified from SERVED metadata; denylist unchanged and re-pinned (§9) | — |
-| **D8a** | how the three BT5 gates transform | allowed-path gates in the A2 shape — one named path, forbidden everywhere else, sanctioned wiring asserted to exist | leave them as blanket bans (impossible: BT5 cannot then wire anything) |
+| **D1** | tool / allowlist expansion | **`data_compute_backtest`, allowlist 8 → 9** — a deliberate, loud capability expansion written into the gate's ALLOWLIST in the same reviewed commit; no new capability class | §4 |
+| **D1a** | denylist | **no speculative expansion** — containment is the exact allowlist plus the served/wiring gate, never an ever-growing name blacklist | §4 |
+| **D2** | strategy set | **Donchian + SMA crossover only** — no arbitrary strategy specification | §5.1 |
+| **D2a** | parameters | **nested strict discriminated strategy object**; five binding rejections; a foreign field is refused, never silently ignored | §5.1 |
+| **D3** | validation ordering | **reject request/schema-decidable errors BEFORE acquisition** — spends no capability on an already-invalid request and keeps error provenance clean | §5.2 |
+| **D4** | acquisition | **existing path only, ≤500 unchanged**; no paging, no second evaluate, no extra fetch. Performance stays RECORD — the optimization trigger is not reached | §6.1 |
+| **D5** | completion | **BT0 §4.7 evidence-only rule retained**, made concrete and observable | §6.2 |
+| **D5a** | mechanism | **same-snapshot successor evidence**; the successor is preserved *before* the membership filter and is **evidence-only, never backtest input**; the decision stays auditable provenance, never an unexplained boolean. Touching `src/core/data.js` is approved **only** for this narrow enrichment | §6.2 |
+| — | **atomic source provenance** | recorded as an **invariant**: every provenance field is captured atomically with the OHLCV snapshot; none may come from an independent subsequent chart read | §6.3 |
+| **D6** | response | **`source` / `assumptions` / `result`**, with the owner's binding minimum field lists; the result block is never reshaped into something that loses a BT0 §4.5 distinction | §7 |
+| **D6a** | symbol | **atomic same-snapshot capture**; omission and a second read are both rejected; **BT5 does not normalize the spelling** | §7 |
+| **D7** | errors | **BT5 owns its boundary errors** (unsupported strategy, invalid params, insufficient completed bars, resolution mismatch, acquisition failure); `getOhlcv` refusals propagate verbatim; no silent degradation | §8 |
+| **D7a** | CLOSED-kernel errors | **transparent propagation, no wrapping**; prefix stacking (`BT5_ERROR: BT3_ERROR: …`) is forbidden | §8 |
+| **D8** | containment | **simulation-only served contract**, verified from the REAL served surface; simulated results are not `data_get_trades` under a new name | §9.1 |
+| **D8a** | gates | **one exact allowed path; all adjacent capabilities remain denied** — gate migration, not removal, and the migrated gate proves five named negatives | §9.2 |
 
-Plus two RECORDs the owner attached: **performance stays RECORD while BT5
-keeps ≤500 bars** (§6.1), and **9222 / `mcp_boundary` is harness hygiene,
-not a BT5 product requirement** (§9.3).
+Two RECORDs the owner attached: **performance stays RECORD while BT5 keeps
+≤500 bars** (§6.1), and **9222 / `mcp_boundary` is harness hygiene, not a
+BT5 product requirement** (§9.3).
 
 ---
 
 ## 12. BT5 closure protocol (owner-ordered sequence)
 
-1. this contract document complete and internally consistent, with the
-   orientation question answered by execution against the real modules
-   (§2.1, §3) — **done**;
-2. **owner adjudication of D1–D8a** (no model review of the contract before
-   it; no product wiring before ratification); ratification lands the
-   docs-only PR (CI1 + CI2 provenance gate);
+1. **DONE** — this contract document complete and internally consistent,
+   with the orientation question answered by execution against the real
+   modules (§2.1, §3);
+2. **DONE — owner adjudication of D1–D8a, 2026-08-24
+   (APPROVED-WITH-PRECISION, §1.5)**; the ruled precisions are written back
+   into §§2–9 and §11, the checker re-run (rev 2, 8/8).
+   **Current position:** ratification lands by merging the docs-only PR
+   (CI1 + CI2 provenance gate). Per the same adjudication, **no Sol/Luna
+   review of the contract** is taken, and product wiring and model review
+   stay closed until that merge;
 3. implementation RED→GREEN against the ratified contract: the served
    schema and description first (the served surface is the public
    contract), the allowlist expansion in the same reviewed commit, the
