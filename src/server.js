@@ -4,6 +4,7 @@ import { registerHealthTools } from './tools/health.js';
 import { registerChartTools } from './tools/chart.js';
 import { registerDataTools } from './tools/data.js';
 import { registerAnalyticsTools } from './tools/analytics.js';
+import { registerBacktestTools } from './tools/backtest.js';
 import { registerCaptureTools } from './tools/capture.js';
 
 const server = new McpServer(
@@ -35,6 +36,7 @@ registerHealthTools(server);
 registerChartTools(server);
 registerDataTools(server);
 registerAnalyticsTools(server);
+registerBacktestTools(server);
 registerCaptureTools(server);
 
 // Startup notice (stderr so it doesn't interfere with MCP stdio protocol)

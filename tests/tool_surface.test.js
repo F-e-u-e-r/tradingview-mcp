@@ -1,7 +1,7 @@
 /**
  * Tool-surface gate for the review build.
  *
- * The server must expose EXACTLY the 8 allowlisted tools — and none of the
+ * The server must expose EXACTLY the 9 allowlisted tools — and none of the
  * denylisted capabilities. `draw_shape`/`draw_clear` are on the DENYLIST, not
  * merely absent from the allowlist: this release removed them because their
  * clear path cannot prove session ownership, and re-registering them must fail
@@ -28,6 +28,14 @@ const ALLOWLIST = [
   // kernel (sma/ema/rsi/atr/donchian) over the SAME validated OHLCV source;
   // no new acquisition path.
   'data_compute_indicator',
+  // BT5 (contract ratified 2026-08-24 @ 35a31c52, merged ab85e472): deliberate
+  // 8→9 expansion — the CLOSED BT1–BT4 backtest pipeline over that SAME
+  // validated OHLCV source. Still no new acquisition path, no bar-cap change,
+  // and no trading capability: `compute` means local deterministic
+  // computation, and the served description says "Simulation only". Upstream's
+  // `data_get_strategy_results` / `data_get_trades` / `data_get_equity` stay
+  // on the DENYLIST below and are NOT being reintroduced under a new name.
+  'data_compute_backtest',
   'capture_screenshot',
 ].sort();
 
@@ -115,7 +123,7 @@ describe('tool surface (allowlist + denylist gate)', () => {
     if (child) child.kill();
   });
 
-  it('exposes exactly the 8 allowlisted tools', () => {
+  it('exposes exactly the 9 allowlisted tools', () => {
     assert.deepEqual(tools.map(t => t.name).sort(), ALLOWLIST);
   });
 

@@ -390,16 +390,36 @@ describe('facade invariants (BT4 Amendment A — migrated from the pre-generaliz
     assert.ok(!/\bif\s*\(\s*strategy/.test(code), 'no branch on strategy identity');
   });
 
-  it('has zero product wiring — no MCP exposure before BT5', () => {
+  it('exactly ONE approved MCP wiring path reaches the backtest kernel (BT5 gate, MIGRATED)', () => {
+    // MIGRATED by the ratified BT5 contract (§9.2 D8a, ratified @ 35a31c52,
+    // merged ab85e472). This gate's meaning changes from "must not reach MCP
+    // at all" to "exactly one owner-approved wiring path exists" — strictly
+    // stronger than deleting it, because the blast radius stays one path and
+    // the path is now named and asserted to exist.
+    //
+    // Comments are STRIPPED before scanning, the same discipline the static
+    // invariants above already use: a comment cannot wire anything, and
+    // documentation that explains this very constraint must not trip it.
+    const APPROVED = new Set(['../src/server.js', '../src/tools/backtest.js', '../src/core/backtest.js']);
+    const strip = (t) => t
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('\n')
+      .map((l) => l.replace(/\/\/.*$/, ''))
+      .join('\n');
     const roots = ['../src/server.js', '../src/connection.js', '../src/wait.js'];
     for (const f of readdirSync(join(here, '../src/tools'))) roots.push(`../src/tools/${f}`);
     for (const f of readdirSync(join(here, '../src/core'))) {
       if (f.endsWith('.js')) roots.push(`../src/core/${f}`);
     }
     for (const rel of roots) {
-      const text = readFileSync(join(here, rel), 'utf8');
-      assert.ok(!text.includes('backtest'), `${rel} must not wire the backtest kernel (BT5 gate)`);
+      if (APPROVED.has(rel)) continue;
+      const code = strip(readFileSync(join(here, rel), 'utf8'));
+      assert.ok(!code.includes('backtest'), `${rel} is not on the approved BT5 path — one path only (D8a)`);
     }
+    // The sanctioned wiring must EXIST: a registration that silently vanished
+    // fails here too, so the gate cannot be satisfied by removing the feature.
+    assert.match(readFileSync(join(here, '../src/server.js'), 'utf8'), /registerBacktestTools\(server\)/,
+      'the one approved wiring path must be registered');
   });
 
   it('A1 indicator kernel is byte-identical to its CLOSED state (owner ruling 2026-08-23)', () => {
